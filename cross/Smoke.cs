@@ -31,6 +31,7 @@ namespace CapriDesktop
         private PixelPoint hipBefore;
         private int dx;
         private int dy;
+        private bool diagnosticPaused;
 
         internal Smoke(Pet pet, string folder)
         {
@@ -45,7 +46,28 @@ namespace CapriDesktop
             if (started < 0) started = now;
             if (stepStart < 0) stepStart = now;
             if (now - started > 90) { Finish("Timed out at step " + step + "."); return; }
-            if (now - stepStart > 15) { checks.Add("INFO " + Seen()); Finish("Step " + step + " took longer than 15 seconds."); return; }
+            if (now - stepStart > 15)
+            {
+                string seen = Seen();
+                checks.Add("INFO " + seen);
+                if (step == 4 && string.Equals(Environment.GetEnvironmentVariable("CAPRI_SMOKE_HOLD_SHELF"), "1", StringComparison.Ordinal) && !diagnosticPaused)
+                {
+                    diagnosticPaused = true;
+                    stepStart = now;
+                    File.WriteAllText(Path.Combine(folder, "hold-shelf.txt"), seen);
+                    double until = now + 8;
+                    while (now < until)
+                    {
+                        ProcessAndLogShelf();
+                        System.Threading.Thread.Sleep(200);
+                        now = pet.Now;
+                    }
+                    Finish("Diagnostic hold expired at step " + step + ".");
+                    return;
+                }
+                Finish("Step " + step + " took longer than 15 seconds.");
+                return;
+            }
             try
             {
                 if (Step(now))
@@ -214,7 +236,7 @@ namespace CapriDesktop
                 }
                 if (pet.Seat != null) return false;
                 double waited = now - coverAt;
-                if (waited < 0.45 || waited > 2) throw new Exception("She stood up " + waited.ToString("0.00") + " s after a window covered her seat; it should be about 0.7 s.");
+                if (waited < 0.45 || waited > 2) throw new Exception("She stood up " + waited.ToString("0.00") + " s after a window covered her seat; it should be about 0.7 s. " + Seen());
                 if (pet.Falling) throw new Exception("Standing up made her fall.");
                 checks.Add("PASS covered: a window over her seat makes her stand up after " + waited.ToString("0.0") + " s");
                 Send(cover, "quit");
@@ -295,6 +317,16 @@ namespace CapriDesktop
                 shot.Render(control);
                 shot.Save(Path.Combine(folder, name));
             }
+        }
+
+        private void ProcessAndLogShelf()
+        {
+            List<string> clients = new List<string>();
+            foreach (HyprWindow window in Hypr.ParseClients(Hypr.Run("-j", "clients")))
+                if (window.Title != null && window.Title.IndexOf("Capri test shelf", StringComparison.OrdinalIgnoreCase) >= 0)
+                    clients.Add(window.Address + " pid=" + window.Pid + " monitor=" + window.MonitorName + " at=" + window.X + "," + window.Y + " size=" + window.Width + "x" + window.Height + " workspace=" + window.WorkspaceName + " mapped=" + window.Mapped + " hidden=" + window.Hidden);
+            string path = Path.Combine(folder, "shelf-live.txt");
+            File.WriteAllText(path, clients.Count == 0 ? "Shelf is not present in hyprctl clients." : string.Join("\n", clients.ToArray()));
         }
 
         private void Scene(string name, Window[] windows, PixelRect[] boxes)

@@ -147,6 +147,8 @@ namespace CapriDesktop
         private Ledge fallTo;
         private double coveredSince = -1;
         private double seatLost = -1;
+        private double lastDeskRefresh;
+        private List<Spot> cachedSpots = new List<Spot>();
         private double nextCheck;
         private int asking;
         private Smoke smoke;
@@ -377,13 +379,26 @@ namespace CapriDesktop
 
         internal List<Spot> Windows()
         {
-            try { return Desk.Windows(Ours()); }
+            try
+            {
+                double now = Now;
+                if (cachedSpots == null || now - lastDeskRefresh >= 0.2)
+                {
+                    cachedSpots = Desk.Windows(Ours());
+                    lastDeskRefresh = now;
+                }
+                return new List<Spot>(cachedSpots);
+            }
             catch (Exception error) { Lose(error); return new List<Spot>(); }
         }
 
         private Spot Find(long window)
         {
-            try { return Desk.Find(window); }
+            try
+            {
+                foreach (Spot spot in Windows()) if (spot.Window == window) return spot;
+                return null;
+            }
             catch (Exception error) { Lose(error); return null; }
         }
 
