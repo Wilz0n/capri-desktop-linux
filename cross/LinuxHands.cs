@@ -53,8 +53,8 @@ namespace CapriDesktop
             Hands.Press = Press;
             Hands.NowPlaying = NowPlaying;
             Hands.PressPlay = PressPlay;
-            Hands.Windows = delegate { return new List<OpenWindow>(); };
-            Hands.Steer = delegate { return false; };
+            Hands.Windows = OpenWindows;
+            Hands.Steer = Steer;
         }
 
         internal static DesktopEntry ParseDesktop(string text)
@@ -388,13 +388,67 @@ namespace CapriDesktop
 
         internal static string PlayerTrack(string player) { return Output("playerctl", "-p", player, "metadata", "--format", "{{title}}"); }
 
-        internal static void SetBrowserLookup(Func<string> settings, Func<string> mime)
+        internal static List<string> BrowserArgs(string exec, string url) { return ExecArguments(exec, url); }
+
+        internal static List<OpenWindow> OpenWindows()
         {
-            browserSetting = settings ?? delegate { return ""; };
-            browserMime = mime ?? delegate { return ""; };
+            List<OpenWindow> found = new List<OpenWindow>();
+            List<HyprMonitor> monitors;
+            try { monitors = Hypr.ParseMonitors(Hypr.Run("-j", "monitors")); }
+            catch (Exception) { return found; }
+            int self = Environment.ProcessId;
+            foreach (HyprWindow window in Hypr.ParseClients(Hypr.Run("-j", "clients")))
+            {
+                if (window.Pid == self || !window.Mapped || window.Hidden || string.IsNullOrEmpty(window.Title)) continue;
+                if (window.Monitor < 0 || window.Monitor >= monitors.Count) continue;
+                HyprMonitor monitor = monitors[window.Monitor];
+                bool active = window.Workspace == monitor.ActiveWorkspace || (window.Special && monitor.SpecialWorkspace != 0 && window.WorkspaceName == "special:" + monitor.Name);
+                if (!active || window.Handle == 0) continue;
+                string program = NormalizeProgram(window.Class);
+                found.Add(new OpenWindow(new IntPtr(window.Handle), window.Title, program));
+            }
+            return found;
         }
 
-        internal static List<string> BrowserArgs(string exec, string url) { return ExecArguments(exec, url); }
+        internal static string NormalizeProgram(string windowClass)
+        {
+            string lower = (windowClass ?? "").ToLowerInvariant();
+            if (lower == "google-chrome" || lower == "google-chrome-stable" || lower == "chromium" || lower == "chromium-browser") return "chrome";
+            if (lower == "microsoft-edge" || lower == "msedge") return "msedge";
+            if (lower == "firefox-esr") return "firefox";
+            if (lower == "vivaldi-stable") return "vivaldi";
+            if (lower == "brave-browser") return "brave";
+            if (lower == "opera-stable") return "opera";
+            return lower;
+        }
+
+        internal static bool Steer(OpenWindow window, string action)
+        {
+            if (window == null || window.Handle == IntPtr.Zero) return false;
+            string address = "0x" + window.Handle.ToInt64().ToString("x", CultureInfo.InvariantCulture);
+            string normalized = action;
+            if (action == "close_tab")
+            {
+                try
+                {
+                    ProcessStartInfo info = StartInfo("hyprctl", new[] { "dispatch", "sendshortcut", "CTRL,W,address:" + address });
+                    using (Process process = Process.Start(info)) return process != null && process.WaitForExit(3000) && process.ExitCode == 0;
+                }
+                catch (Exception) { return false; }
+            }
+            string dispatch = Hypr.WindowAction(normalized, address);
+            if (dispatch == null) return false;
+            string[] parts = dispatch.Split(' ');
+            string[] args = new string[parts.Length + 1];
+            args[0] = "dispatch";
+            Array.Copy(parts, 0, args, 1, parts.Length);
+            return RunWait("hyprctl", args);
+        }
+
+        internal static bool ProgramClassMatches(string windowClass, string wanted)
+        {
+            return string.Equals(NormalizeProgram(windowClass), NormalizeProgram(wanted), StringComparison.OrdinalIgnoreCase);
+        }
 
         private static string NowPlaying()
         {

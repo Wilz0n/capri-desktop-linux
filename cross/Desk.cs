@@ -19,12 +19,13 @@ namespace CapriDesktop
         internal List<PixelRect> Screens = new List<PixelRect>();
         internal double Scale = 1;
 
-        internal static Desk Make()
+        internal static Desk Make(Avalonia.Controls.TopLevel owner = null)
         {
             try
             {
                 if (OperatingSystem.IsWindows()) return new WindowsDesk();
                 if (OperatingSystem.IsMacOS()) return new MacDesk();
+                if (OperatingSystem.IsLinux() && !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("HYPRLAND_INSTANCE_SIGNATURE"))) return new HyprlandDesk(owner);
                 if (OperatingSystem.IsLinux() && Environment.GetEnvironmentVariable("WAYLAND_DISPLAY") == null && Environment.GetEnvironmentVariable("DISPLAY") != null) return new X11Desk();
             }
             catch (Exception) { }
@@ -36,6 +37,7 @@ namespace CapriDesktop
         internal abstract List<Spot> Windows(ICollection<long> skip);
         internal abstract Spot Find(long window);
         internal abstract bool Alive(long window);
+        internal virtual int CoordinateScale { get { return 1; } }
         internal virtual string Debug() { return ""; }
 
         protected bool Fills(PixelRect bounds)

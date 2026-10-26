@@ -110,7 +110,7 @@ namespace CapriDesktop
         private static readonly string[] SizeNames = { "Small", "Medium", "Large", "Huge" };
         internal readonly Brain Brain = new Brain();
         internal readonly Talk Talk;
-        internal Desk Desk = Desk.Make();
+        internal Desk Desk;
         internal Func<string, string> Think;
         internal Settings Saved;
         private readonly IClassicDesktopStyleApplicationLifetime desktop;
@@ -154,6 +154,7 @@ namespace CapriDesktop
         internal Pet(IClassicDesktopStyleApplicationLifetime desktop)
         {
             this.desktop = desktop;
+            Desk = Desk.Make(this);
             folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Capri");
             Saved = Program.Smoke != null ? new Settings() : Load();
             Brain.LogPath = Path.Combine(Program.Smoke ?? folder, "errors.txt");
@@ -205,6 +206,15 @@ namespace CapriDesktop
         internal Clip PerchGlitch { get { return perchGlitch; } }
         internal IList<Clip> Clips { get { return new[] { idle, blink, blinkGlitch, glitch, dangle, perch, perchBlink, perchBlinkGlitch, perchGlitch, mouth }; } }
         internal PixelPoint Anchor { get { return anchor; } }
+        internal IList<PixelRect> WorkAreas
+        {
+            get
+            {
+                List<PixelRect> found = new List<PixelRect>();
+                foreach (Screen screen in Screens.All) found.Add(screen.WorkingArea);
+                return found;
+            }
+        }
         internal PixelPoint Hip { get { return new PixelPoint(anchor.X + Px(body.Size * SitX), anchor.Y + Px(body.Size * SitY)); } }
         internal int Headroom { get { return (int)Math.Ceiling(body.Size * (SitY - PerchTop) * DesktopScaling); } }
         internal int Feet { get { return anchor.Y + Px(body.Size * 0.99); } }
@@ -217,7 +227,7 @@ namespace CapriDesktop
         private double FrameX { get { return body.Size * 0.08 - 8; } }
         private double FrameY { get { return -body.Size * 0.06 - 8; } }
 
-        private int Px(double dip) { return (int)Math.Round(dip * DesktopScaling); }
+        private int Px(double dip) { return (int)Math.Round(dip * DesktopScaling * Desk.CoordinateScale); }
 
         internal PixelPoint Seated(int x, int y) { return new PixelPoint(x - Px(body.Size * SitX), y - Px(body.Size * SitY)); }
 
@@ -225,6 +235,11 @@ namespace CapriDesktop
         {
             anchor = to;
             Position = new PixelPoint(to.X + Px(FrameX), to.Y + Px(FrameY));
+        }
+
+        internal Screen ScreenFor(PixelPoint point)
+        {
+            return Screens.ScreenFromPoint(point) ?? Screens.Primary;
         }
 
         private void Fit()
