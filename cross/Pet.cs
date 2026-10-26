@@ -25,6 +25,7 @@ namespace CapriDesktop
         [DataMember] internal bool Placed;
         [DataMember] internal double Size = 240;
         [DataMember] internal string Model;
+        [DataMember] internal string Browser;
     }
 
     internal sealed class Clip
@@ -173,6 +174,11 @@ namespace CapriDesktop
             nextGlitch = 30 + random.NextDouble() * 30;
             ContextMenu = Menu();
             Talk = new Talk(this);
+            if (OperatingSystem.IsLinux())
+            {
+                LinuxHands.Install();
+                if (Program.Smoke == null) Brain.Act = Hands.Do;
+            }
             frames.Interval = TimeSpan.FromMilliseconds(33);
             frames.Tick += delegate { Tick(); };
             Opened += delegate
@@ -593,6 +599,22 @@ namespace CapriDesktop
                 pick.Click += delegate { Resize(size); };
                 sizes.Items.Add(pick);
             }
+            if (OperatingSystem.IsLinux())
+            {
+                MenuItem browser = new MenuItem { Header = "Browser" };
+                string automatic = LinuxBrowsers.AutomaticLabel();
+                MenuItem automaticPick = new MenuItem { Header = "Automatic (" + automatic + ")", ToggleType = Avalonia.Controls.MenuItemToggleType.Radio, IsChecked = string.IsNullOrEmpty(Saved.Browser) };
+                automaticPick.Click += delegate { Saved.Browser = null; Save(); };
+                browser.Items.Add(automaticPick);
+                foreach (BrowserChoice choice in LinuxBrowsers.List())
+                {
+                    BrowserChoice selected = choice;
+                    MenuItem pick = new MenuItem { Header = selected.Name, ToggleType = Avalonia.Controls.MenuItemToggleType.Radio, IsChecked = string.Equals(Saved.Browser, selected.Id, StringComparison.Ordinal) };
+                    pick.Click += delegate { Saved.Browser = selected.Id; Save(); };
+                    browser.Items.Add(pick);
+                }
+                menu.Items.Add(browser);
+            }
             MenuItem discord = new MenuItem { Header = "Join the Discord" };
             discord.Click += delegate { Browse(DiscordPage); };
             MenuItem quit = new MenuItem { Header = "Quit Capri" };
@@ -644,6 +666,7 @@ namespace CapriDesktop
             Brain.Cancel();
             string blocked = Safety.Screen(text);
             if (blocked != null) { Talk.Answer(text, blocked); return; }
+            if (OperatingSystem.IsLinux() && Program.Smoke == null && Talk.ResolveMediaChoice(text)) return;
             Func<string, string> think = Think;
             if (think == null)
             {

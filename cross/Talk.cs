@@ -372,6 +372,8 @@ namespace CapriDesktop
 
         internal void Submit(string text) { Typer.Send(text); }
 
+        internal bool ResolveMediaChoice(string text) { return MediaArbiter.TryResolve(text, this); }
+
         internal void Thinking(string heard)
         {
             reply = null;
