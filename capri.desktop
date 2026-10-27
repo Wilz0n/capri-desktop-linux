@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Capri
+GenericName=Asistente de escritorio Capri
+Comment=Inicia Capri Desktop
+Exec=/home/wilzon/dev-personal/capri/capri-desktop-linux/start-capri.sh
+TryExec=/home/wilzon/dev-personal/capri/capri-desktop-linux/start-capri.sh
+Icon=/home/wilzon/.local/share/icons/hicolor/256x256/apps/capri.png
+Terminal=false
+Categories=Utility;Accessibility;
+StartupNotify=true

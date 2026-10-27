@@ -138,6 +138,9 @@ namespace CapriDesktop
                 List<string> noUrlArgs = LinuxHands.BrowserArgs("spotify --uri=%u", null);
                 if (noUrlArgs.Count != 1 || noUrlArgs[0] != "spotify") throw new Exception("An empty desktop URL placeholder left a malformed argument.");
                 checks.Add("PASS desktop Exec fields: URLs substitute as a single argument and empty URL arguments are removed");
+                List<string> appLaunch = LinuxHands.DesktopLaunchArgs("/usr/share/applications/spotify.desktop");
+                if (appLaunch.Count != 2 || appLaunch[0] != "--" || appLaunch[1] != "spotify.desktop") throw new Exception("Installed desktop applications weren't launched in an Omarchy/UWSM app scope by desktop entry ID.");
+                checks.Add("PASS desktop app launch: installed apps use uwsm-app and their registered desktop entry ID");
                 if (LinuxBrowsers.DefaultDesktop("google-chrome.desktop", "firefox.desktop") != "google-chrome.desktop") throw new Exception("The XDG browser setting didn't take precedence.");
                 if (LinuxBrowsers.DefaultDesktop("", "/apps/google-chrome.desktop") != "google-chrome.desktop") throw new Exception("The MIME browser fallback didn't resolve its desktop entry.");
                 checks.Add("PASS browser preference: xdg-settings takes precedence over MIME handler and IDs use exact desktop file names");

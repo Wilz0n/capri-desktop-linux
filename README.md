@@ -89,7 +89,15 @@ This section describes the current development configuration so the Linux setup 
 
 #### Build and launch Capri
 
-From the repository root:
+From the repository root, start Capri with the included launcher:
+
+```sh
+./start-capri.sh
+```
+
+The script runs `out/Capri/Capri` when a published executable is available; otherwise it runs the project with `dotnet run --project cross/Capri.Cross.csproj`. This is a foreground process: keep that terminal open while using Capri, and press `Ctrl+C` there to stop it. It does not install a background service or start Capri automatically after login. On first run, the .NET SDK restores/builds the project as needed.
+
+To build and publish a standalone Linux executable instead:
 
 ```sh
 dotnet build cross/Capri.Cross.csproj -c Release
@@ -98,7 +106,21 @@ dotnet publish cross/Capri.Cross.csproj -c Release -r linux-x64 --self-contained
   -p:DebugType=none -o out/Capri
 ```
 
-Launch `out/Capri/Capri`. Keep the executable and its resources together when not using single-file publishing. Capri stores ordinary preferences in its user config folder and the OpenRouter key separately in `$XDG_CONFIG_HOME/Capri/openrouter.key` (normally `~/.config/Capri/openrouter.key`, mode `0600`). Do not commit or copy that key in a repository, `cross.json`, logs, screenshots, or this guide. On a new device, open the Capri tray menu → **Brain settings…** and enter that device's own key.
+After publishing, `./start-capri.sh` uses `out/Capri/Capri` automatically. You can also launch `./out/Capri/Capri` directly. Keep the executable and its resources together when not using single-file publishing. Capri stores ordinary preferences in its user config folder and the OpenRouter key separately in `$XDG_CONFIG_HOME/Capri/openrouter.key` (normally `~/.config/Capri/openrouter.key`, mode `0600`). Do not commit or copy that key in a repository, `cross.json`, logs, screenshots, or this guide. On a new device, open the Capri tray menu → **Brain settings…** and enter that device's own key.
+
+#### Add Capri to the Omarchy Super+I Apps menu
+
+Run the included installer from the repository root:
+
+```sh
+./install-omarchy.sh
+```
+
+The script registers Capri in the current user's applications directory and installs its icon under the hicolor icon theme. The source image is `assets/capri.webp`; Omarchy's current Apps menu icon resolver searches SVG and PNG files, so the script uses ImageMagick (`magick`) to convert it to a 256×256 PNG. It writes absolute `Exec`, `TryExec`, and `Icon` paths that match this checkout, making it safe to clone the repository to another directory and run the installer there. The script only installs the launcher and icon; it does not start Capri. It optionally validates the desktop entry when `desktop-file-validate` is available.
+
+After installation, close and reopen **Super+I**, then search for **Capri** under **Apps**. The app row should show the Capri image. Selecting that row starts `start-capri.sh`, which uses the published executable if present and otherwise starts the project through .NET. If you move the checkout later, rerun `./install-omarchy.sh` so the desktop entry is regenerated with the new absolute paths.
+
+Requirements for installing the menu entry: Bash, ImageMagick (`magick`), and a user session with Omarchy. On Arch/Omarchy, install ImageMagick with `sudo pacman -S imagemagick` if it is missing. `desktop-file-validate` is optional and provided by `desktop-file-utils`.
 
 #### Brain: OpenRouter free-only setup
 

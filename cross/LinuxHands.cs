@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -229,6 +230,40 @@ namespace CapriDesktop
             catch (InvalidOperationException) { return false; }
         }
 
+        private static bool RunDesktopApp(string id, string exec)
+        {
+            try
+            {
+                ProcessStartInfo info = StartInfo("uwsm-app", DesktopLaunchArgs(id));
+                Process process = Process.Start(info);
+                if (process == null) return false;
+                ThreadPool.QueueUserWorkItem(delegate(object state)
+                {
+                    using (Process launcher = (Process)state)
+                    {
+                        try { launcher.WaitForExit(); }
+                        catch (InvalidOperationException) { }
+                        finally { launcher.Dispose(); }
+                    }
+                }, process);
+                return true;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                return RunExec("uwsm-app -- " + exec, null);
+            }
+            catch (InvalidOperationException)
+            {
+                return RunExec("uwsm-app -- " + exec, null);
+            }
+        }
+
+        internal static List<string> DesktopLaunchArgs(string desktopFile)
+        {
+            List<string> args = new List<string> { "--", Path.GetFileName(desktopFile) };
+            return args;
+        }
+
         private static void Run(string id)
         {
             if (string.IsNullOrWhiteSpace(id)) return;
@@ -248,7 +283,7 @@ namespace CapriDesktop
             Candidate app = id.StartsWith(Launcher, StringComparison.Ordinal) ? Find(id.Substring(Launcher.Length)) : null;
             if (app != null)
             {
-                RunExec(app.Exec, null);
+                RunDesktopApp(app.Id, app.Exec);
                 return;
             }
             if (id.StartsWith("spotify:", StringComparison.OrdinalIgnoreCase) && Output("playerctl", "-p", "spotify", "status").Length > 0)
