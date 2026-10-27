@@ -76,16 +76,26 @@ Mac and the upstream Linux release remain early previews. The Linux/Hyprland set
 3. **Mac:** unzip it and open Capri. If macOS says it can't check her, open System Settings → Privacy & Security and click **Open Anyway**. Needs macOS 15 or newer
 4. **Linux upstream preview:** unpack it and run `Capri/Capri`. It sits on windows on X11; on Wayland it sits at the bottom of your screen. The additional Linux features below are in this repository's Linux build.
 
-### Linux/Hyprland setup and migration
+### Linux/Omarchy setup and migration
 
-This section describes the current development configuration so the Linux setup can be recreated on another computer. It is not a one-click installer: copy the repository/build and configure each machine's compositor and services locally.
+To prepare a new Omarchy machine from this repository, run:
+
+```sh
+./setup-omarchy.sh
+```
+
+The installer adds required Arch packages, configures the Voxtype user service and Spanish `large-v3-turbo` model, publishes Capri for Linux x64, registers the app in the Omarchy Super+I menu, and sets up the `capri --rescue` command. It does not copy OpenRouter credentials. Enter that device's own key in Capri → **Brain settings…**.
+
+By default, the script does not edit Hyprland files; it prints the two Lua snippets to review. Use `./setup-omarchy.sh --apply-hyprland` to append the border rule and `Super+Shift+C` rescue binding idempotently (with backups), then reload Hyprland. `./setup-omarchy.sh --dry-run` previews actions. Additional options: `--skip-voxtype`, `--skip-build`, and `--help`. See [HYPRLAND-SETUP.md](HYPRLAND-SETUP.md) for the exact configuration, verification, and safety constraints.
+
+#### Requirements and manual setup
 
 #### Requirements
 
-- 64-bit Linux, .NET 10 SDK to build from source, and a Wayland session using Hyprland 0.55+ (the current development setup uses Hyprland 0.56.2).
-- Voxtype installed as a **user** service, configured with a working microphone and Whisper model. The current setup uses local Whisper `large-v3-turbo`, Spanish (`es`), a `type` output mode, and an enabled Voxtype state file. Choose/download the Whisper model on the destination machine as appropriate.
-- `playerctl` and `wpctl` for the optional Linux media controls; `notify-send` for recording status notices.
-- A mic and internet access for local transcription input plus the cloud Brain. OpenRouter is optional if only local dictation is needed.
+- 64-bit Arch Linux/Omarchy, a Wayland Hyprland session, and a working microphone.
+- The script installs .NET 10 SDK and the Linux dependencies, then builds this checkout. For other Linux distributions, follow the manual build and menu instructions below.
+- Voxtype local transcription uses Whisper `large-v3-turbo` in Spanish (`es`). Model download requires internet access.
+- Capri's OpenRouter Brain requires internet and a separately configured key; local voice transcription can work without OpenRouter.
 
 #### Build and launch Capri
 
@@ -131,24 +141,16 @@ Requirements for installing the menu entry: Bash, ImageMagick (`magick`), and a 
 
 Free model availability and limits can change. A `:free` model may be temporarily rate-limited or unavailable; wait and retry rather than substituting a paid model. Never paste a key into a terminal command or ask an assistant to print it.
 
-#### Voice: Capri Wave button vs. global Voxtype hotkey
-
-These are deliberately separate paths:
+#### Voice: Capri Wave button
 
 - **Capri's Wave button:** Capri checks Voxtype's state, starts a recording to `$XDG_RUNTIME_DIR/capri/voice.txt` with directory mode `0700`, stops only a recording it started, waits for transcription, consumes the text once, then sends it through Capri's normal safety/media/Brain pipeline. The on-screen Wave changes to listening/transcribing. If OpenRouter is not connected, Capri reports the recognized text and asks for Brain setup rather than claiming it answered.
-- **Global Voxtype shortcut:** in the current personal Hyprland setup, `Super + Ctrl + G` is the normal standalone `voxtype record toggle`. It types the recognized text into whichever field currently has focus. It does **not** send that text to Capri. There is intentionally no paired `Super + Alt + G` binding in this setup; the toggle key starts or stops based on Voxtype's state. If a destination device uses a separate start/stop pair, configure it according to that device's Voxtype documentation, keeping it separate from Capri's Wave flow.
-
-Voxtype settings are machine-specific and intentionally are not modified by Capri's installer. Confirm the daemon is active (`systemctl --user status voxtype.service`) and the state file is `idle` before testing. Test global typing in a harmless text field first; test the Wave button separately. Do not trigger a hotkey while another Voxtype recording is active: Capri's button will not stop a recording it did not start.
+Voxtype settings are machine-specific and intentionally are not modified by Capri's installer. Confirm the daemon is active (`systemctl --user status voxtype.service`) and the state file is `idle` before testing the Wave button. Capri's button will not stop a recording it did not start.
 
 The Wave button uses Voxtype's CLI directly. Its output goes to Capri's private runtime inbox, and Capri polls the state file to avoid consuming partial or duplicate transcripts. The runtime inbox is temporary and is not a migration target; create it automatically on the new session. Do not copy another computer's `/run/user/...` files.
 
 #### Hyprland: hidden border for Capri only
 
-For Hyprland 0.55+ (Lua configuration), this persistent per-window rule hides only Capri's compositor border while preserving global border settings and normal input:
-
-### Capri without Hyprland's window outline
-
-On Hyprland 0.55+ (Lua configuration), you can hide the compositor border for Capri only while keeping the normal border width and colors for all other windows. Add this to `~/.config/hypr/hyprland.lua` or to a Lua file it loads:
+On Hyprland 0.55+ (Lua configuration), this persistent per-window rule hides only Capri's compositor border while preserving global border settings and normal input. Add it to `~/.config/hypr/hyprland.lua` or to a Lua file it loads:
 
 ```lua
 hl.window_rule({ name = "capri-no-outline", match = { class = "^Capri$" }, border_size = 0 })
@@ -156,15 +158,11 @@ hl.window_rule({ name = "capri-no-outline", match = { class = "^Capri$" }, borde
 
 Add the rule to `~/.config/hypr/hyprland.lua` or a Lua module it loads, then run `hyprctl reload`. The anchored class match is intentionally scoped; do not set transparent border colors or `border_size = 0` globally. Check the actual class on a new machine with `hyprctl clients -j` and adjust the regex only if that class differs. The rule persists across Capri restarts.
 
-For Capri's rescue binding, the personal Hyprland setup uses `Super + Shift + C` → `capri --rescue`. It only works when the running Capri process has the rescue IPC listener. If Capri is off-screen, check `hyprctl clients -j` and the registered binding with `hyprctl binds -j`; do not blindly move or close other windows. Use the running process's tray action/menu or the rescue helper, and verify the resulting position afterward.
+For Capri's rescue binding, the personal Hyprland setup uses `Super + Shift + C` → `capri --rescue`. Ensure `capri` on `PATH` points to the current published executable (for this checkout: `out/Capri/Capri`) so the rescue command matches the running build. If Capri is off-screen, check `hyprctl clients -j` and the registered binding with `hyprctl binds -j`; do not blindly move or close other windows. Verify the resulting position afterward.
 
-#### What to migrate (and what not to)
+#### Migration safety
 
-- Migrate the Capri source/build instructions, the destination device's personal Hyprland Lua rule/bindings, and a freshly configured Voxtype service/model.
-- Re-enter the OpenRouter key on the destination through Capri's Brain settings; do not copy secrets as part of source control or documentation.
-- Do **not** copy runtime state such as `$XDG_RUNTIME_DIR/voxtype/state` or `$XDG_RUNTIME_DIR/capri/voice.txt`.
-- Do **not** overwrite the destination's `~/.config/voxtype/config.toml` or all of `~/.config/hypr`; add only the needed personal bindings/rule.
-- `plan.md` in this development checkout is a local planning file, not a portable setup guide. This README section is the human-facing migration note.
+The installer makes a timestamped backup before changing an existing Voxtype configuration or adding Hyprland snippets. It never copies runtime state from another machine and never reads or migrates the OpenRouter key. Enter the key separately in Capri → **Brain settings…**. Voice input is started with Capri's Wave button; no global Voxtype hotkey is required.
 
 ## How to use her
 

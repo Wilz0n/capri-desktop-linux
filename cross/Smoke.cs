@@ -187,7 +187,7 @@ namespace CapriDesktop
                 checks.Add("PASS Voxtype state/inbox smoke uses fixtures only; no recording or stop command was executed");
                 string script = VoxtypeScript.Build().Replace("\r\n", "\n");
                 if (!script.Contains("voxtype record toggle", StringComparison.Ordinal) || script.Contains("capri --dictation prepare", StringComparison.Ordinal) || script.Contains("capri --dictation-status", StringComparison.Ordinal)) throw new Exception("The Voxtype Hyprland dispatcher should remain a standalone Voxtype toggle, independent of Capri hotkeys.");
-                checks.Add("PASS Voxtype user hotkey remains a standalone toggle; Capri voice capture is controlled by its Wave button");
+                checks.Add("PASS global Voxtype hotkeys are not required; Capri voice capture is controlled by its Wave button");
                 string routeFolder = Path.Combine(folder, "route-fixture");
                 Directory.CreateDirectory(routeFolder);
                 File.WriteAllText(Path.Combine(routeFolder, "voice.txt"), "hola Capri");

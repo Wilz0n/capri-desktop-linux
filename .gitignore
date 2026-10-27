@@ -1,4 +1,6 @@
 bin/
 obj/
 smoke/
+out/
 *.user
+/capri.desktop
