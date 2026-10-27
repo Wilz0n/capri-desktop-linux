@@ -912,7 +912,11 @@ namespace CapriDesktop
 
         internal void ShowBrainPanel()
         {
-            if (BrainPanel == null) BrainPanel = new BrainPanel(this);
+            if (BrainPanel == null || !BrainPanel.IsVisible)
+            {
+                BrainPanel = new BrainPanel(this);
+                BrainPanel.Closed += delegate { BrainPanel = null; };
+            }
             BrainPanel.Show();
             BrainPanel.Activate();
         }
@@ -922,9 +926,31 @@ namespace CapriDesktop
             string key = BrainSecretStore.Load("openrouter") ?? Saved.OpenRouterKey;
             if (string.IsNullOrWhiteSpace(key)) return;
             string selected = Saved.OpenRouterUseFreeRouter ? OpenRouterPool.FreeRouter : Saved.OpenRouterModel;
-            OpenRouter = new OpenRouterPool(key, selected == OpenRouterPool.FreeRouter ? new[] { OpenRouterPool.FreeRouter } : Saved.OpenRouterModel == null ? null : new[] { Saved.OpenRouterModel });
+            OpenRouter = OpenRouterPool.Automatic(key, Saved.OpenRouterUseFreeRouter ? null : selected);
+            Saved.OpenRouterUseFreeRouter = false;
+            Saved.OpenRouterModel = OpenRouter.Models.FirstOrDefault() ?? selected;
             Brain.Model = OpenRouter.Models.FirstOrDefault();
             Brain.Remote = null;
+            RefreshOpenRouterQuota(OpenRouter);
+        }
+
+        internal void RefreshOpenRouterQuota(OpenRouterPool pool)
+        {
+            if (pool == null || string.IsNullOrWhiteSpace(pool.Key)) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    OpenRouterDailyQuota quota = OpenRouterWire.GetQuota(pool.Key);
+                    if (quota == null) return;
+                    pool.SetDailyQuota(quota.Used, quota.Limit, quota.Remaining);
+                    Dispatcher.UIThread.Post(delegate
+                    {
+                        if (BrainPanel != null && BrainPanel.IsVisible) BrainPanel.UpdateQuota(pool.QuotaText());
+                    });
+                }
+                catch (Exception) { }
+            });
         }
 
         internal void Hear(string text)
@@ -941,6 +967,11 @@ namespace CapriDesktop
             if (OperatingSystem.IsLinux() && Program.Smoke == null && Talk.ResolveMediaChoice(text)) return;
             Func<string, string> think = Think;
             OpenRouterPool pool = OpenRouter;
+            if (pool != null && pool.IsBlocked)
+            {
+                Talk.Answer(text, OpenRouterPool.DailyLimitMessage(pool.BlockedUntil));
+                return;
+            }
             if (think == null)
             {
                 if (pool != null && !string.IsNullOrEmpty(Brain.Model))
@@ -975,15 +1006,15 @@ namespace CapriDesktop
             {
                 OpenRouterResponse response;
                 try { response = OpenRouterWire.CompleteRaw(pool, rawHistory, true); }
-                catch (OpenRouterRequestException error) { throw new BrainException(OpenRouterPool.ErrorMessage(error.Status), true); }
-                if (response.Choices == null || response.Choices.Length == 0 || response.Choices[0].Message == null) throw new BrainException("OpenRouter returned no answer. Try again.", true);
-                if (!string.IsNullOrWhiteSpace(response.Model) && !string.Equals(pool.LastModel, response.Model, StringComparison.Ordinal))
+                catch (OpenRouterRequestException error)
                 {
-                    pool.LastModel = response.Model;
-                    Saved.OpenRouterModel = response.Model;
-                    Brain.Model = response.Model;
-                    Save();
+                    if (error.DailyLimit || pool.IsBlocked) throw new BrainException(OpenRouterPool.DailyLimitMessage(pool.BlockedUntil == DateTime.MinValue ? OpenRouterPool.NextDailyResetUtc(DateTime.UtcNow) : pool.BlockedUntil), true);
+                    if (error.Status == 429 && error.RetryAfterSeconds > 0) throw new BrainException("OpenRouter is temporarily rate-limited. Wait " + error.RetryAfterSeconds + " seconds and try again.", true);
+                    throw new BrainException(OpenRouterPool.ErrorMessage(error.Status), true);
                 }
+                if (turn == 0) RefreshOpenRouterQuota(pool);
+                if (response.Choices == null || response.Choices.Length == 0 || response.Choices[0].Message == null) throw new BrainException("OpenRouter returned no answer. Try again.", true);
+                if (!string.IsNullOrWhiteSpace(response.Model)) pool.LastModel = response.Model;
                 OpenRouterMessage message = response.Choices[0].Message;
                 List<ToolCall> calls = new List<ToolCall>();
                 List<KeyValuePair<string, ToolArguments>> valid = new List<KeyValuePair<string, ToolArguments>>();
@@ -1009,7 +1040,7 @@ namespace CapriDesktop
                     string result = Hands.Do(call.Function.Name, args);
                     rawHistory.Add(OpenRouterWire.ToolResult(call.Id, result));
                 }
-                if (turn == 3) return string.Join(" ", valid.ConvertAll(delegate(KeyValuePair<string, ToolArguments> call) { return call.Key; }).ToArray());
+                if (turn == 3 || pool.DailyRemaining >= 0 && pool.DailyRemaining <= 5) return string.Join(" ", valid.ConvertAll(delegate(KeyValuePair<string, ToolArguments> call) { return call.Key; }).ToArray());
             }
             return "OpenRouter reached the tool-call limit for this request.";
         }

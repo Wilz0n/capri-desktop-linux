@@ -135,11 +135,11 @@ Requirements for installing the menu entry: Bash, ImageMagick (`magick`), and a 
 #### Brain: OpenRouter free-only setup
 
 1. Open **Brain settings…** from Capri's tray menu.
-2. Enter an OpenRouter API key, select a currently supported `:free` model, choose a reply language, and press **Connect**. The key is stored locally with owner-only file permissions.
-3. The configured model is checked against Capri's built-in free-model allowlist before use. Ordered model IDs retain the `:free` suffix; no local paid-model fallback is used. `openrouter/free` is an optional standalone mode and is not mixed into the ordered model list.
+2. Enter an OpenRouter API key, choose the preferred free model, choose a reply language, and press **Connect**. Capri places the preferred model first, then routes through its current catalog of free models with tool support. The key is stored locally with owner-only file permissions.
+3. Capri refreshes the public model catalog hourly and admits only IDs ending in `:free` whose advertised prompt/completion prices are zero, that support tools and text output, and that have not expired. Requests contain only those IDs and a zero maximum provider price; responses from any ID outside the verified free pool are rejected. Paid fallback models and the standalone free router are not used.
 4. Verify the panel shows **Connected** and send one ordinary, non-private prompt. A tool action is only successful after Capri executes it; do not assume that model text alone means an action happened.
 
-Free model availability and limits can change. A `:free` model may be temporarily rate-limited or unavailable; wait and retry rather than substituting a paid model. Never paste a key into a terminal command or ask an assistant to print it.
+Free model availability and OpenRouter's account limits can change. The Brain panel reports the free-request counter when OpenRouter makes it available. If a provider/model is limited, Capri automatically falls back to another verified free model. If the account's daily free quota is exhausted, Capri stops requests and reports the reset time; daily quotas reset at 00:00 UTC (the local time depends on your timezone). A 402, invalid key, or nonzero-price route is never retried with a paid model. Never paste a key into a terminal command or ask an assistant to print it.
 
 #### Voice: Capri Wave button
 

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Globalization;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Text;
@@ -25,6 +26,26 @@ namespace CapriDesktop
         [DataMember(Name = "model")] internal string Model;
         [DataMember(Name = "choices")] internal OpenRouterChoice[] Choices;
         [DataMember(Name = "error")] internal OpenRouterApiError Error;
+    }
+
+    [DataContract]
+    internal sealed class OpenRouterQuotaResponse
+    {
+        [DataMember(Name = "data")] internal OpenRouterQuotaData Data;
+    }
+
+    [DataContract]
+    internal sealed class OpenRouterDailyQuota
+    {
+        [DataMember(Name = "used")] internal int Used;
+        [DataMember(Name = "limit")] internal int Limit;
+        [DataMember(Name = "remaining")] internal int Remaining;
+    }
+
+    [DataContract]
+    internal sealed class OpenRouterQuotaData
+    {
+        [DataMember(Name = "free_model_daily_requests")] internal OpenRouterDailyQuota FreeModelDailyRequests;
     }
 
     [DataContract]
@@ -75,15 +96,31 @@ namespace CapriDesktop
     internal sealed class OpenRouterPool
     {
         internal const string Endpoint = "https://openrouter.ai/api/v1/chat/completions";
-        internal static readonly string[] Requested =
+        internal static string[] Requested =
         {
-            "cohere/north-mini-code:free",
-            "poolside/laguna-s-2.1:free",
-            "nvidia/nemotron-3-ultra-550b-a55b:free",
             "nvidia/nemotron-3.5-lightning:free",
+            "google/gemma-4-26b-a4b-it:free",
+            "cohere/north-mini-code:free",
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
             "google/gemma-4-31b-it:free",
-            "thinkingmachines/inkling:free"
+            "thinkingmachines/inkling:free",
+            "thinkingmachines/inkling-small:free",
+            "liquid/lfm-2.5-2.6b:free",
+            "recursive/flint-v1.0:free",
+            "xingchen-agi/xing4.0-29b-a4b:free",
+            "nvidia/nemotron-3.5-super-vl:free",
+            "dots-studio/dots-3-note-preview:free",
+            "poolside/laguna-xs-2.1:free",
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+            "google/gemma-4-26b-a4b-it:free"
         };
+        internal static readonly string[] PreferredDefaults =
+        {
+            "nvidia/nemotron-3.5-lightning:free",
+            "google/gemma-4-26b-a4b-it:free",
+            "cohere/north-mini-code:free"
+        };
+        internal static Func<string, string[]> CatalogOverride;
         internal const string FreeRouter = "openrouter/free";
         private static readonly Regex FreeModel = new Regex(@"\A[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*:free\z", RegexOptions.IgnoreCase);
         private static readonly HashSet<string> VerifiedFree = new HashSet<string>(Requested.Where(delegate(string id) { return id != FreeRouter; }), StringComparer.OrdinalIgnoreCase);
@@ -92,11 +129,23 @@ namespace CapriDesktop
         internal readonly string[] Models;
         internal string LastModel;
         internal string LastUsage;
+        internal DateTime BlockedUntil;
+        internal int DailyUsed = -1;
+        internal int DailyLimit = -1;
+        internal int DailyRemaining = -1;
+        internal DateTime LastQuotaCheck;
+        internal readonly Dictionary<string, DateTime> Cooling = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
         internal OpenRouterPool(string key, IEnumerable<string> models = null)
         {
             Key = (key ?? "").Trim();
             Models = ValidatePool(models ?? Requested);
+        }
+
+        internal static OpenRouterPool Automatic(string key, string preferred = null)
+        {
+            string[] models = CatalogOverride == null ? OpenRouterCatalog.Load(preferred) : OpenRouterCatalog.Order(CatalogOverride(preferred), preferred);
+            return new OpenRouterPool(key, models);
         }
 
         internal static string[] ValidatePool(IEnumerable<string> models)
@@ -106,7 +155,7 @@ namespace CapriDesktop
             foreach (string model in models)
             {
                 string id = (model ?? "").Trim();
-                if ((IsFreeRouter(id) || (FreeModel.IsMatch(id) && VerifiedFree.Contains(id))) && !safe.Contains(id, StringComparer.OrdinalIgnoreCase)) safe.Add(id);
+                if ((IsFreeRouter(id) || FreeModel.IsMatch(id)) && !safe.Contains(id, StringComparer.OrdinalIgnoreCase)) safe.Add(id);
             }
             return safe.ToArray();
         }
@@ -146,14 +195,15 @@ namespace CapriDesktop
         internal static bool Retryable(int httpStatus, int providerCode)
         {
             if (httpStatus == 401 || httpStatus == 403) return false;
+            if (httpStatus == 402) return false;
             return httpStatus == 408 || httpStatus == 409 || httpStatus == 429 || httpStatus >= 500 || providerCode == 429 || providerCode >= 500;
         }
 
         internal static string ErrorMessage(int status)
         {
             if (status == 401 || status == 403) return "OpenRouter rechazó la clave. Revisa la conexión en la configuración de Capri.";
-            if (status == 402) return "OpenRouter no aceptó la solicitud gratuita; no se intentó usar ningún modelo de pago.";
-            if (status == 429) return "Los modelos gratuitos de OpenRouter están limitados temporalmente. Capri probará el siguiente modelo gratuito.";
+            if (status == 402) return "OpenRouter no aceptó la solicitud. Capri no usará modelos de pago.";
+            if (status == 429) return "Los modelos gratuitos de OpenRouter están limitados temporalmente. Capri probará otros modelos gratuitos.";
             if (status == 408 || status >= 500) return "OpenRouter está temporalmente indisponible. Capri probará el siguiente modelo gratuito.";
             return "OpenRouter no pudo completar la solicitud gratuita (HTTP " + status + ").";
         }
@@ -162,6 +212,53 @@ namespace CapriDesktop
         {
             foreach (string id in ValidatePool(models)) if (id != current && (skipped == null || !skipped.Contains(id))) return id;
             return null;
+        }
+
+        internal bool IsBlocked { get { return BlockedUntil > DateTime.UtcNow; } }
+
+        internal void SetDailyQuota(int used, int limit, int remaining)
+        {
+            DailyUsed = Math.Max(0, used);
+            DailyLimit = Math.Max(0, limit);
+            DailyRemaining = Math.Max(0, remaining);
+            LastQuotaCheck = DateTime.UtcNow;
+            if (DailyRemaining == 0) BlockedUntil = NextDailyResetUtc(DateTime.UtcNow);
+            else if (BlockedUntil <= DateTime.UtcNow) BlockedUntil = DateTime.MinValue;
+        }
+
+        internal void BlockDaily(DateTime untilUtc)
+        {
+            BlockedUntil = untilUtc > DateTime.UtcNow ? untilUtc : NextDailyResetUtc(DateTime.UtcNow);
+            DailyRemaining = 0;
+        }
+
+        internal string QuotaText()
+        {
+            if (DailyLimit < 0) return "Free requests quota not checked";
+            return "Today: " + DailyUsed + "/" + DailyLimit + " free requests · " + DailyRemaining + " remaining";
+        }
+
+        internal static DateTime NextDailyResetUtc(DateTime nowUtc)
+        {
+            DateTime tomorrow = nowUtc.Date.AddDays(1);
+            return DateTime.SpecifyKind(tomorrow, DateTimeKind.Utc);
+        }
+
+        internal void Cooldown(string model, TimeSpan duration)
+        {
+            if (!string.IsNullOrWhiteSpace(model)) Cooling[model] = DateTime.UtcNow.Add(duration);
+        }
+
+        internal bool IsCooling(string model)
+        {
+            DateTime until;
+            return Cooling.TryGetValue(model ?? "", out until) && until > DateTime.UtcNow;
+        }
+
+        internal static string DailyLimitMessage(DateTime resetUtc)
+        {
+            DateTime local = resetUtc.ToLocalTime();
+            return "Se agotó el límite diario gratuito de OpenRouter. Se restablece a las " + local.ToString("h:mm tt", CultureInfo.CurrentCulture) + " (hora local). Capri no usa modelos de pago.";
         }
 
         internal string EndpointForTest { get { return Endpoint; } }

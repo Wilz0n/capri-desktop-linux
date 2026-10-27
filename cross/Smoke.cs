@@ -151,9 +151,9 @@ namespace CapriDesktop
                 checks.Add("PASS media arbitration: Spotify, Chrome, both and neither choices resolve without controlling players");
                 if (!MediaArbiter.ShouldPause(new List<string> { "spotify", "chromium.instance4834" }, "pausa") || MediaArbiter.ShouldPause(new List<string> { "spotify", "chromium.instance4834" }, "quiero escuchar Spotify")) throw new Exception("Ambiguous media actions weren't separated from explicit player choice.");
                 checks.Add("PASS media safety: ambiguous commands ask which player, explicit player intent doesn't");
-                string[] pool = OpenRouterPool.ValidatePool(new[] { "cohere/north-mini-code:free", "google/gemma-4-31b-it", "qwen/qwen3.8-27b:free", "nvidia/nemotron-3.5-lightning:free" });
+                string[] pool = OpenRouterPool.ValidatePool(new[] { "nvidia/nemotron-3.5-lightning:free", "google/gemma-4-26b-a4b-it:free", "cohere/north-mini-code:free", "google/gemma-4-31b-it", "qwen/qwen3.8-27b:free" });
                 string[] router = OpenRouterPool.ValidatePool(new[] { "openrouter/free" });
-                if (string.Join(",", pool) != "cohere/north-mini-code:free,nvidia/nemotron-3.5-lightning:free" || router.Length != 1 || !OpenRouterPool.IsFreeRouter(router[0])) throw new Exception("OpenRouter pool assertion: pool=" + string.Join(",", pool) + " routerCount=" + router.Length + " router=" + (router.Length == 0 ? "none" : router[0]) + ".");
+                if (string.Join(",", pool) != "nvidia/nemotron-3.5-lightning:free,google/gemma-4-26b-a4b-it:free,cohere/north-mini-code:free,qwen/qwen3.8-27b:free" || router.Length != 1 || !OpenRouterPool.IsFreeRouter(router[0])) throw new Exception("OpenRouter pool assertion: pool=" + string.Join(",", pool) + " routerCount=" + router.Length + " router=" + (router.Length == 0 ? "none" : router[0]) + ".");
                 OpenRouterRequest request = OpenRouterPool.Request(pool, new[] { new ChatMessage("user", "Hello") }, false);
                 bool routerMixRejected = false;
                 try { OpenRouterPool.Request(new[] { "openrouter/free", "cohere/north-mini-code:free" }, new ChatMessage[0], false); }
@@ -161,17 +161,70 @@ namespace CapriDesktop
                 if (string.Join(",", request.Models) != string.Join(",", pool) || !routerMixRejected || OpenRouterPool.Next(pool[0], pool, new HashSet<string>()) != pool[1] || OpenRouterPool.Retryable(401, 401) || !OpenRouterPool.Retryable(429, 429)) throw new Exception("OpenRouter free-only request or fallback policy failed.");
                 checks.Add("PASS OpenRouter pool: only exact free IDs are routed, order is preserved, paid/unverified models are rejected");
                 string orderedJson = OpenRouterWire.BuildPoolJson(pool, new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, true);
-                if (!orderedJson.Contains("\"models\":[\"cohere/north-mini-code:free\",\"nvidia/nemotron-3.5-lightning:free\"]") || orderedJson.Contains("openrouter/free") || orderedJson.Contains("qwen/qwen3.8-27b:free")) throw new Exception("OpenRouter ordered fallback JSON did not exactly match the free-only allowlist.");
+                if (!orderedJson.Contains("\"models\":[\"nvidia/nemotron-3.5-lightning:free\",\"google/gemma-4-26b-a4b-it:free\",\"cohere/north-mini-code:free\",\"qwen/qwen3.8-27b:free\"]") || orderedJson.Contains("openrouter/free") || orderedJson.Contains("\"provider\":{\"max_price\":{\"prompt\":0,\"completion\":0}}") == false) throw new Exception("OpenRouter ordered fallback JSON did not exactly match the free-only allowlist.");
                 checks.Add("PASS OpenRouter request preserves the user-defined fallback order and excludes standalone router/unverified IDs");
+                string catalogJson = "{\"data\":[" +
+                    "{\"id\":\"cohere/north-mini-code:free\",\"context_length\":256000,\"pricing\":{\"prompt\":\"0\",\"completion\":\"0\"},\"supported_parameters\":[\"tools\"],\"architecture\":{\"output_modalities\":[\"text\"]}}," +
+                    "{\"id\":\"google/gemma-4-26b-a4b-it:free\",\"context_length\":262144,\"pricing\":{\"prompt\":\"0\",\"completion\":\"0\"},\"supported_parameters\":[\"tools\"],\"architecture\":{\"output_modalities\":[\"text\"]}}," +
+                    "{\"id\":\"nvidia/nemotron-3.5-lightning:free\",\"context_length\":1000000,\"pricing\":{\"prompt\":\"0\",\"completion\":\"0\"},\"supported_parameters\":[\"tools\"],\"architecture\":{\"output_modalities\":[\"text\"]}}," +
+                    "{\"id\":\"vendor/paid:free\",\"context_length\":100000,\"pricing\":{\"prompt\":\"0.1\",\"completion\":\"0\"},\"supported_parameters\":[\"tools\"],\"architecture\":{\"output_modalities\":[\"text\"]}}," +
+                    "{\"id\":\"vendor/notools:free\",\"context_length\":100000,\"pricing\":{\"prompt\":\"0\",\"completion\":\"0\"},\"supported_parameters\":[],\"architecture\":{\"output_modalities\":[\"text\"]}}," +
+                    "{\"id\":\"vendor/expired:free\",\"context_length\":100000,\"expiration_date\":\"2020-01-01\",\"pricing\":{\"prompt\":\"0\",\"completion\":\"0\"},\"supported_parameters\":[\"tools\"],\"architecture\":{\"output_modalities\":[\"text\"]}}," +
+                    "{\"id\":\"vendor/image:free\",\"context_length\":100000,\"pricing\":{\"prompt\":\"0\",\"completion\":\"0\"},\"supported_parameters\":[\"tools\"],\"architecture\":{\"output_modalities\":[\"text\",\"image\"]}}]}";
+                string[] verifiedCatalog = OpenRouterCatalog.Parse(catalogJson);
+                if (string.Join(",", verifiedCatalog) != "nvidia/nemotron-3.5-lightning:free,google/gemma-4-26b-a4b-it:free,cohere/north-mini-code:free") throw new Exception("The dynamic catalog included a paid, expired, non-tool or non-text model, or used the wrong preference order.");
+                checks.Add("PASS OpenRouter catalog accepts only zero-price, current free text/tool models and applies the preferred order");
+                string[] preferredCatalog = OpenRouterCatalog.Parse(catalogJson, "cohere/north-mini-code:free");
+                if (preferredCatalog[0] != "cohere/north-mini-code:free") throw new Exception("The selected preferred model wasn't promoted to the first fallback position.");
+                checks.Add("PASS OpenRouter preferred model is first while other verified free models remain available as fallbacks");
+                OpenRouterPool.CatalogOverride = delegate(string preferred) { return verifiedCatalog; };
+                OpenRouterPool automaticPool = OpenRouterPool.Automatic("smoke-test-key", "cohere/north-mini-code:free");
+                OpenRouterPool.CatalogOverride = null;
+                if (automaticPool.Models.Length != 3 || automaticPool.Models[0] != "cohere/north-mini-code:free") throw new Exception("OpenRouter automatic pool did not retain the complete safe catalog and preferred model.");
                 OpenRouterWire.SendOverride = delegate(string secret, string json)
                 {
                     if (secret != "smoke-test-key") throw new Exception("The OpenRouter fake transport received an unexpected key.");
-                    if (json.Contains("google/gemma-4-31b-it\"") || !json.Contains("\"models\":[\"cohere/north-mini-code:free\"") || json.Contains("openrouter/free")) throw new Exception("The OpenRouter request model list wasn't free-only.");
+                    if (json.Contains("google/gemma-4-31b-it\"") || !json.Contains("\"models\":[\"cohere/north-mini-code:free\"") || json.Contains("openrouter/free") || !json.Contains("\"provider\":{\"max_price\":{\"prompt\":0,\"completion\":0}}")) throw new Exception("The OpenRouter request model list wasn't free-only or lacked the zero-price guard.");
                     return "{\"model\":\"cohere/north-mini-code:free\",\"choices\":[{\"message\":{\"content\":\"fake answer\"}}]}";
                 };
                 OpenRouterResponse fake = OpenRouterWire.Complete(new OpenRouterPool("smoke-test-key", new[] { "cohere/north-mini-code:free" }), new[] { new ChatMessage("user", "hello") }, false);
                 OpenRouterWire.SendOverride = null;
                 if (fake.Choices[0].Message.Content != "fake answer" || fake.Model != "cohere/north-mini-code:free") throw new Exception("OpenRouter fake transport response failed.");
+                OpenRouterWire.GetQuotaOverride = delegate(string secret, string endpoint)
+                {
+                    if (secret != "smoke-test-key" || endpoint != "https://openrouter.ai/api/v1/key") throw new Exception("The quota status request targeted an unexpected endpoint or key.");
+                    return "{\"data\":{\"free_model_daily_requests\":{\"used\":47,\"limit\":50,\"remaining\":3}}}";
+                };
+                OpenRouterDailyQuota quotaFixture = OpenRouterWire.GetQuota("smoke-test-key");
+                OpenRouterWire.GetQuotaOverride = null;
+                if (quotaFixture == null || quotaFixture.Used != 47 || quotaFixture.Limit != 50 || quotaFixture.Remaining != 3) throw new Exception("OpenRouter daily free quota parsing failed.");
+                checks.Add("PASS OpenRouter quota endpoint parsing reports current free requests used/limit/remaining");
+                string capturedFallback = null;
+                OpenRouterWire.SendOverride = delegate(string secret, string json)
+                {
+                    capturedFallback = json;
+                    return "{\"model\":\"nvidia/nemotron-3.5-lightning:free\",\"choices\":[{\"message\":{\"content\":\"fallback answer\"}}]}";
+                };
+                OpenRouterResponse fallbackResponse = OpenRouterWire.CompleteRaw(new OpenRouterPool("smoke-test-key", new[] { "cohere/north-mini-code:free", "nvidia/nemotron-3.5-lightning:free" }), new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, false);
+                OpenRouterWire.SendOverride = null;
+                if (fallbackResponse.Model != "nvidia/nemotron-3.5-lightning:free" || capturedFallback == null || !capturedFallback.Contains("\"provider\":{\"max_price\":{\"prompt\":0,\"completion\":0}}") || !capturedFallback.Contains("cohere/north-mini-code:free") || !capturedFallback.Contains("nvidia/nemotron-3.5-lightning:free")) throw new Exception("Automatic free-model fallback or zero-price guard wasn't included in the request.");
+                checks.Add("PASS OpenRouter automatic free fallback request includes only pool models and a zero-price provider ceiling");
+                OpenRouterWire.SendOverride = delegate(string secret, string json) { return "{\"model\":\"vendor/paid-model\",\"choices\":[{\"message\":{\"content\":\"should reject\"}}]}"; };
+                bool paidResponseRejected = false;
+                try { OpenRouterWire.CompleteRaw(new OpenRouterPool("smoke-test-key", new[] { "cohere/north-mini-code:free" }), new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, false); }
+                catch (OpenRouterRequestException error) { paidResponseRejected = error.Status == 402; }
+                OpenRouterWire.SendOverride = null;
+                if (!paidResponseRejected) throw new Exception("OpenRouter accepted a response from a non-free model.");
+                OpenRouterPool quotaPool = new OpenRouterPool("smoke-test-key", new[] { "cohere/north-mini-code:free" });
+                quotaPool.BlockDaily(DateTime.UtcNow.AddHours(4));
+                int quotaCalls = 0;
+                OpenRouterWire.SendOverride = delegate(string secret, string json) { quotaCalls++; throw new Exception("Daily quota block still sent a request."); };
+                bool quotaBlocked = false;
+                try { OpenRouterWire.CompleteRaw(quotaPool, new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, false); }
+                catch (OpenRouterRequestException error) { quotaBlocked = error.DailyLimit; }
+                OpenRouterWire.SendOverride = null;
+                if (!quotaBlocked || quotaCalls != 0) throw new Exception("Daily free quota did not block outgoing requests locally.");
+                checks.Add("PASS OpenRouter locally blocks exhausted daily quota and never accepts a non-free response");
                 OpenRouterResponse fakeTool = OpenRouterPool.ParseResponse("{\"model\":\"cohere/north-mini-code:free\",\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call-safe-1\",\"type\":\"function\",\"function\":{\"name\":\"open_app\",\"arguments\":\"{\\\"name\\\":\\\"Spotify\\\"}\"}}]}}]}");
                 OpenRouterToolCall parsedTool = fakeTool.Choices[0].Message.ToolCalls[0];
                 string toolResult = OpenRouterWire.ToolResult(parsedTool.Id, "Opened Spotify.");
