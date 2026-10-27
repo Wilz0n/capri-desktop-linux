@@ -32,13 +32,14 @@ namespace CapriDesktop
 
         public override void Render(DrawingContext context)
         {
-            if (Glitch <= 0) { Clean(context); return; }
-            if (random.NextDouble() < 0.25 * Glitch) return;
+            double glitch = Math.Max(0, Math.Min(1, Glitch));
+            if (glitch <= 0) { Clean(context); return; }
+            if (random.NextDouble() < 0.25 * glitch) return;
             double y = 0;
             while (y < Bounds.Height)
             {
                 double band = Math.Min(Bounds.Height - y, 3 + random.Next(10));
-                double shift = (random.NextDouble() * 2 - 1) * 10 * Glitch;
+                double shift = (random.NextDouble() * 2 - 1) * 10 * glitch;
                 using (context.PushClip(new Rect(0, y, Bounds.Width, band)))
                 using (context.PushTransform(Matrix.CreateTranslation(shift, 0))) Clean(context);
                 y += band;
@@ -47,10 +48,10 @@ namespace CapriDesktop
             {
                 double band = 2 + random.Next(6);
                 double row = random.Next(Math.Max(1, (int)(Bounds.Height - band)));
-                double shift = (random.NextDouble() * 2 - 1) * 14 * Glitch;
+                double shift = (random.NextDouble() * 2 - 1) * 14 * glitch;
                 Color tint = i == 0 ? Look.Cyan : Look.Red;
                 using (context.PushClip(new Rect(shift, row, Bounds.Width, band)))
-                    context.FillRectangle(new SolidColorBrush(Color.FromArgb((byte)(150 * Glitch), tint.R, tint.G, tint.B)), new Rect(0, row, Bounds.Width, band));
+                context.FillRectangle(new SolidColorBrush(Color.FromArgb((byte)(150 * glitch), tint.R, tint.G, tint.B)), new Rect(0, row, Bounds.Width, band));
             }
         }
 
@@ -234,6 +235,7 @@ namespace CapriDesktop
     internal sealed class PillFace : Control
     {
         internal int Hover;
+        internal DictationState VoiceState;
 
         public override void Render(DrawingContext context)
         {
@@ -251,7 +253,8 @@ namespace CapriDesktop
                 context.DrawEllipse(new SolidColorBrush(Color.FromArgb(30, 255, 255, 255)), null, lit, radius, radius);
             }
             Pencil(context, pencil, Hover == 1 ? Look.Cyan : Look.Ink);
-            Wave(context, wave, Hover == 2 ? Look.Cyan : Look.Ink);
+            Color waveColour = VoiceState == DictationState.Recording ? Look.Red : VoiceState == DictationState.Transcribing ? Look.Dim : Hover == 2 ? Look.Cyan : Look.Ink;
+            Wave(context, wave, waveColour);
         }
 
         private static void Pencil(DrawingContext context, Point centre, Color colour)
@@ -308,6 +311,7 @@ namespace CapriDesktop
         }
 
         internal bool Over { get { return face.IsPointerOver; } }
+        internal void SetVoiceState(DictationState state) { face.VoiceState = state; face.InvalidateVisual(); }
 
         private int Part(double x) { return x < Wide / 2 ? 1 : 2; }
 
@@ -347,13 +351,14 @@ namespace CapriDesktop
         private double leaving = -1;
         private double pillUntil;
         private bool thinking;
+        private DictationState voiceState = DictationState.Idle;
 
         internal Talk(Pet pet)
         {
             this.pet = pet;
             Typer.Submitted += delegate(string text) { pet.Hear(text); };
             Pill.Typing += delegate { if (Typer.IsVisible) Typer.Hide(); else Open(); };
-            Pill.Voice += delegate { pet.NoVoice(); };
+            Pill.Voice += delegate { pet.ToggleVoice(); };
             Bubble.Dismissed += delegate { if (leaving < 0) leaving = pet.Now; };
         }
 
@@ -362,7 +367,20 @@ namespace CapriDesktop
         internal bool Typing { get { return Typer.IsVisible; } }
         internal bool Done { get { return reply != null && replyDone >= 0; } }
         internal bool Quiet { get { return reply == null && !thinking && !Typer.IsVisible; } }
+        internal bool VoiceBusy { get { return voiceState == DictationState.Recording || voiceState == DictationState.Transcribing; } }
+        internal DictationState VoiceState { get { return voiceState; } }
         internal Control Face { get { return Bubble.Sheet; } }
+
+        internal void SetVoiceState(DictationState state)
+        {
+            voiceState = state;
+            Pill.SetVoiceState(state);
+            if (state == DictationState.Recording || state == DictationState.Transcribing)
+            {
+                pillUntil = pet.Now + 1.5;
+                UpdatePill(pet.Now);
+            }
+        }
 
         internal void Open()
         {
@@ -439,7 +457,7 @@ namespace CapriDesktop
         private void UpdatePill(double now)
         {
             bool allowed = !pet.Busy;
-            if (allowed && (pet.Hovered || (Pill.IsVisible && Pill.Over) || Typer.IsVisible || reply != null || thinking)) pillUntil = Math.Max(pillUntil, now + 1.5);
+            if (allowed && (pet.Hovered || (Pill.IsVisible && Pill.Over) || Typer.IsVisible || reply != null || thinking || VoiceBusy)) pillUntil = Math.Max(pillUntil, now + 1.5);
             if (!allowed || now > pillUntil) { if (Pill.IsVisible) Pill.Hide(); return; }
             double scale = pet.DesktopScaling;
             PixelPoint feet = pet.FeetPoint;

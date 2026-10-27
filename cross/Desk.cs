@@ -38,6 +38,7 @@ namespace CapriDesktop
         internal abstract Spot Find(long window);
         internal abstract bool Alive(long window);
         internal virtual int CoordinateScale { get { return 1; } }
+        internal virtual void Prioritize(ICollection<long> windows) { }
         internal virtual string Debug() { return ""; }
 
         protected bool Fills(PixelRect bounds)

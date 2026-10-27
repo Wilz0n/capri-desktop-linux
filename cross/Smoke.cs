@@ -32,12 +32,15 @@ namespace CapriDesktop
         private int dx;
         private int dy;
         private bool diagnosticPaused;
+        private int smokeStepLimit;
 
         internal Smoke(Pet pet, string folder)
         {
             this.pet = pet;
             this.folder = folder;
             Directory.CreateDirectory(folder);
+            int limit;
+            if (int.TryParse(Environment.GetEnvironmentVariable("CAPRI_SMOKE_STEP_LIMIT"), out limit) && limit > 0) smokeStepLimit = limit;
         }
 
         internal void Tick(double now)
@@ -74,6 +77,7 @@ namespace CapriDesktop
                 {
                     step++;
                     stepStart = now;
+                    if (smokeStepLimit > 0 && step >= smokeStepLimit) { Finish(null); return; }
                 }
             }
             catch (Exception error) { Finish(error.Message); }
@@ -83,9 +87,20 @@ namespace CapriDesktop
 
         private PixelRect Work()
         {
-            Screen screen = pet.Screens.Primary ?? pet.ScreenHere();
+            Screen screen = PickedScreen() ?? pet.Screens.Primary ?? pet.ScreenHere();
             if (screen == null) throw new Exception("No screen was found.");
             return screen.WorkingArea;
+        }
+
+        private Screen PickedScreen()
+        {
+            string wanted = Environment.GetEnvironmentVariable("CAPRI_SMOKE_MONITOR");
+            if (string.IsNullOrWhiteSpace(wanted)) return null;
+            foreach (Screen screen in pet.Screens.All)
+                if (string.Equals(screen.DisplayName, wanted, StringComparison.OrdinalIgnoreCase)) return screen;
+            int index;
+            if (int.TryParse(wanted, out index) && index >= 0 && index < pet.Screens.All.Count) return pet.Screens.All[index];
+            throw new InvalidOperationException("Smoke monitor '" + wanted + "' isn't available. Avalonia sees: " + string.Join(", ", pet.Screens.All));
         }
 
         private bool Sitting()
@@ -107,6 +122,7 @@ namespace CapriDesktop
                 if (converted.X != 4079 || converted.Y != 60 || converted.Width != 1000 || observed.X != 4079 || observed.Y != 60 || observed.Width != 1000 || hyprClients[0].Handle != 0xabc || hyprClients[1].Handle != 0) throw new Exception("Hyprland XWayland coordinate conversion or address parsing failed: " + converted + " observed " + observed + " address " + hyprClients[0].Handle + "/" + hyprClients[1].Handle + ".");
                 if (Hypr.ResolveMonitorIndex(new[] { new HyprMonitor { Name = "HDMI-A-1" } }, "HDMI-A-1", 0) != 0 || Hypr.MeasureCoordinateScale(new HyprMonitor { Width = 1920 }, new[] { new PixelRect(3840, 0, 1920, 1080) }) != 1) throw new Exception("Hyprland monitor matching or XWayland scale measurement failed.");
                 if (Hypr.MeasureXWaylandScale(new HyprMonitor { Width = 1920 }, new[] { new PixelRect(3840, 0, 1920, 1080) }) != 1 || Hypr.MeasureXWaylandScale(new HyprMonitor { Width = 1920 }, new[] { new PixelRect(3840, 0, 3840, 2160) }) != 1) throw new Exception("XWayland output scale measurement failed.");
+                if (Hypr.AnchorVisible(5070, 890, 217, 285, new[] { new HyprMonitor { X = 0, Y = 0, Width = 1920, Height = 1080, Scale = 1 }, new HyprMonitor { X = 1920, Y = 0, Width = 1920, Height = 1080, Scale = 1 } }) || !Hypr.AnchorVisible(2600, 800, 217, 285, new[] { new HyprMonitor { X = 1920, Y = 0, Width = 1920, Height = 1080, Scale = 1 } })) throw new Exception("Recovery anchor screen validation failed.");
                 checks.Add("PASS Hyprland JSON: scaled HDMI geometry, monitor matching and XWayland conversion parse");
                 DesktopEntry entry = LinuxHands.ParseDesktop("[Desktop Entry]\nName=Default name\nName[es]=Nombre localizado\nExec=/usr/bin/example --open %u\nType=Application\n");
                 if (entry.Name != "Default name" || entry.Exec != "/usr/bin/example --open %u" || entry.Type != "Application") throw new Exception("A desktop entry was parsed incorrectly.");
@@ -132,6 +148,48 @@ namespace CapriDesktop
                 checks.Add("PASS media arbitration: Spotify, Chrome, both and neither choices resolve without controlling players");
                 if (!MediaArbiter.ShouldPause(new List<string> { "spotify", "chromium.instance4834" }, "pausa") || MediaArbiter.ShouldPause(new List<string> { "spotify", "chromium.instance4834" }, "quiero escuchar Spotify")) throw new Exception("Ambiguous media actions weren't separated from explicit player choice.");
                 checks.Add("PASS media safety: ambiguous commands ask which player, explicit player intent doesn't");
+                string[] pool = OpenRouterPool.ValidatePool(new[] { "cohere/north-mini-code:free", "google/gemma-4-31b-it", "qwen/qwen3.8-27b:free", "nvidia/nemotron-3.5-lightning:free" });
+                string[] router = OpenRouterPool.ValidatePool(new[] { "openrouter/free" });
+                if (string.Join(",", pool) != "cohere/north-mini-code:free,nvidia/nemotron-3.5-lightning:free" || router.Length != 1 || !OpenRouterPool.IsFreeRouter(router[0])) throw new Exception("OpenRouter pool assertion: pool=" + string.Join(",", pool) + " routerCount=" + router.Length + " router=" + (router.Length == 0 ? "none" : router[0]) + ".");
+                OpenRouterRequest request = OpenRouterPool.Request(pool, new[] { new ChatMessage("user", "Hello") }, false);
+                bool routerMixRejected = false;
+                try { OpenRouterPool.Request(new[] { "openrouter/free", "cohere/north-mini-code:free" }, new ChatMessage[0], false); }
+                catch (InvalidOperationException) { routerMixRejected = true; }
+                if (string.Join(",", request.Models) != string.Join(",", pool) || !routerMixRejected || OpenRouterPool.Next(pool[0], pool, new HashSet<string>()) != pool[1] || OpenRouterPool.Retryable(401, 401) || !OpenRouterPool.Retryable(429, 429)) throw new Exception("OpenRouter free-only request or fallback policy failed.");
+                checks.Add("PASS OpenRouter pool: only exact free IDs are routed, order is preserved, paid/unverified models are rejected");
+                string orderedJson = OpenRouterWire.BuildPoolJson(pool, new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, true);
+                if (!orderedJson.Contains("\"models\":[\"cohere/north-mini-code:free\",\"nvidia/nemotron-3.5-lightning:free\"]") || orderedJson.Contains("openrouter/free") || orderedJson.Contains("qwen/qwen3.8-27b:free")) throw new Exception("OpenRouter ordered fallback JSON did not exactly match the free-only allowlist.");
+                checks.Add("PASS OpenRouter request preserves the user-defined fallback order and excludes standalone router/unverified IDs");
+                OpenRouterWire.SendOverride = delegate(string secret, string json)
+                {
+                    if (secret != "smoke-test-key") throw new Exception("The OpenRouter fake transport received an unexpected key.");
+                    if (json.Contains("google/gemma-4-31b-it\"") || !json.Contains("\"models\":[\"cohere/north-mini-code:free\"") || json.Contains("openrouter/free")) throw new Exception("The OpenRouter request model list wasn't free-only.");
+                    return "{\"model\":\"cohere/north-mini-code:free\",\"choices\":[{\"message\":{\"content\":\"fake answer\"}}]}";
+                };
+                OpenRouterResponse fake = OpenRouterWire.Complete(new OpenRouterPool("smoke-test-key", new[] { "cohere/north-mini-code:free" }), new[] { new ChatMessage("user", "hello") }, false);
+                OpenRouterWire.SendOverride = null;
+                if (fake.Choices[0].Message.Content != "fake answer" || fake.Model != "cohere/north-mini-code:free") throw new Exception("OpenRouter fake transport response failed.");
+                OpenRouterResponse fakeTool = OpenRouterPool.ParseResponse("{\"model\":\"cohere/north-mini-code:free\",\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call-safe-1\",\"type\":\"function\",\"function\":{\"name\":\"open_app\",\"arguments\":\"{\\\"name\\\":\\\"Spotify\\\"}\"}}]}}]}");
+                OpenRouterToolCall parsedTool = fakeTool.Choices[0].Message.ToolCalls[0];
+                string toolResult = OpenRouterWire.ToolResult(parsedTool.Id, "Opened Spotify.");
+                string toolAssistant = OpenRouterWire.ToolCallMessage(null, new List<OpenRouterToolCall> { parsedTool });
+                if (toolAssistant.IndexOf("call-safe-1", StringComparison.Ordinal) < 0 || toolResult.IndexOf("call-safe-1", StringComparison.Ordinal) < 0 || toolResult.IndexOf("tool_call_id", StringComparison.Ordinal) < 0) throw new Exception("OpenRouter tool call id/result correlation failed.");
+                checks.Add("PASS OpenRouter HTTP client fake completion and tool call/result ID serialization");
+                DictationState dictation;
+                if (!Dictate.ParseState("idle", out dictation) || dictation != DictationState.Idle || !Dictate.ParseState("recording\n", out dictation) || dictation != DictationState.Recording || !Dictate.ParseState("transcribing", out dictation) || dictation != DictationState.Transcribing || Dictate.ParseState("busy", out dictation)) throw new Exception("Voxtype state parser accepted/rejected a state incorrectly.");
+                string inboxFolder = Path.Combine(folder, "voxtype-fixture");
+                Directory.CreateDirectory(inboxFolder);
+                File.WriteAllText(Path.Combine(inboxFolder, "voice.txt"), "hola Capri");
+                if (Dictate.ReadInboxForTest(inboxFolder) != "hola Capri" || File.Exists(Path.Combine(inboxFolder, "voice.txt"))) throw new Exception("Voxtype inbox didn't deliver once and remove the consumed transcript.");
+                checks.Add("PASS Voxtype state/inbox smoke uses fixtures only; no recording or stop command was executed");
+                string script = VoxtypeScript.Build().Replace("\r\n", "\n");
+                if (!script.Contains("voxtype record toggle", StringComparison.Ordinal) || script.Contains("capri --dictation prepare", StringComparison.Ordinal) || script.Contains("capri --dictation-status", StringComparison.Ordinal)) throw new Exception("The Voxtype Hyprland dispatcher should remain a standalone Voxtype toggle, independent of Capri hotkeys.");
+                checks.Add("PASS Voxtype user hotkey remains a standalone toggle; Capri voice capture is controlled by its Wave button");
+                string routeFolder = Path.Combine(folder, "route-fixture");
+                Directory.CreateDirectory(routeFolder);
+                File.WriteAllText(Path.Combine(routeFolder, "voice.txt"), "hola Capri");
+                if (Dictate.ReadInboxForTest(routeFolder) != "hola Capri" || File.Exists(Path.Combine(routeFolder, "voice.txt"))) throw new Exception("The Voxtype inbox fixture wasn't consumed once.");
+                checks.Add("PASS Voxtype inbox fixture is consumed once without a recording or cloud request");
                 if (pet.ActualTransparencyLevel == WindowTransparencyLevel.Transparent) checks.Add("PASS her window is see-through");
                 else checks.Add("LIMIT her window isn't see-through here (" + pet.ActualTransparencyLevel + "); on Linux that needs a compositor");
                 checks.Add("INFO window list: " + pet.Desk.Name);
@@ -326,7 +384,18 @@ namespace CapriDesktop
                 if (window.Title != null && window.Title.IndexOf("Capri test shelf", StringComparison.OrdinalIgnoreCase) >= 0)
                     clients.Add(window.Address + " pid=" + window.Pid + " monitor=" + window.MonitorName + " at=" + window.X + "," + window.Y + " size=" + window.Width + "x" + window.Height + " workspace=" + window.WorkspaceName + " mapped=" + window.Mapped + " hidden=" + window.Hidden);
             string path = Path.Combine(folder, "shelf-live.txt");
-            File.WriteAllText(path, clients.Count == 0 ? "Shelf is not present in hyprctl clients." : string.Join("\n", clients.ToArray()));
+            string clientsText = clients.Count == 0 ? "Shelf is not present in hyprctl clients." : string.Join("\n", clients.ToArray());
+            string raw = Hypr.Run("-j", "clients");
+            File.WriteAllText(path, clientsText + "\n--- matching raw Hyprland JSON ---\n" + MatchingClientJson(raw, "Capri test shelf"));
+        }
+
+        internal static string MatchingClientJson(string json, string title)
+        {
+            List<string> matched = new List<string>();
+            foreach (HyprWindow window in Hypr.ParseClients(json))
+                if ((window.Title ?? "").IndexOf(title ?? "", StringComparison.OrdinalIgnoreCase) >= 0)
+                    matched.Add(window.Address + " monitorIndex=" + window.Monitor + " monitorName='" + window.MonitorName + "' at=" + window.X + "," + window.Y + " size=" + window.Width + "x" + window.Height + " workspace=" + window.WorkspaceName);
+            return matched.Count == 0 ? "No matching title in parsed client list." : string.Join("\n", matched.ToArray());
         }
 
         private void Scene(string name, Window[] windows, PixelRect[] boxes)

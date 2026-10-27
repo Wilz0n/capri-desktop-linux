@@ -244,12 +244,26 @@ namespace CapriDesktop
                         return Math.Max(1, (int)Math.Round(monitor.Width / (double)screen.Width));
             return 1;
         }
+
+        internal static bool AnchorVisible(int x, int y, double width, double height, IList<HyprMonitor> monitors)
+        {
+            if (monitors == null) return false;
+            foreach (HyprMonitor monitor in monitors)
+            {
+                double overlapX = Math.Min(x + width, monitor.X + monitor.Width) - Math.Max(x, monitor.X);
+                double overlapY = Math.Min(y + height, monitor.Y + monitor.Height) - Math.Max(y, monitor.Y);
+                if (overlapX >= Math.Min(width, 48) && overlapY >= Math.Min(height, 48)) return true;
+            }
+            return false;
+        }
+
     }
 
     internal sealed class HyprlandDesk : Desk
     {
         private readonly Avalonia.Controls.TopLevel owner;
         private List<HyprMonitor> monitors;
+        private List<HyprWindow> clients;
         private PixelRect[] screens;
         private int[] coordinateScales;
         private int[] xwaylandScales;
@@ -266,6 +280,7 @@ namespace CapriDesktop
             try
             {
                 monitors = Hypr.ParseMonitors(Hypr.Run("-j", "monitors"));
+                clients = Hypr.ParseClients(Hypr.Run("-j", "clients"));
                 screens = CurrentScreens(owner);
                 coordinateScales = new int[monitors.Count];
                 xwaylandScales = new int[monitors.Count];
@@ -281,6 +296,7 @@ namespace CapriDesktop
             catch (Exception error)
             {
                 monitors = new List<HyprMonitor>();
+                clients = new List<HyprWindow>();
                 screens = new PixelRect[0];
                 coordinateScales = new int[0];
                 xwaylandScales = new int[0];
@@ -306,7 +322,6 @@ namespace CapriDesktop
             Refresh();
             List<Spot> found = new List<Spot>();
             if (monitors.Count == 0) return found;
-            List<HyprWindow> clients = Hypr.ParseClients(Hypr.Run("-j", "clients"));
             clients.Sort(delegate(HyprWindow a, HyprWindow b) { return a.FocusHistory.CompareTo(b.FocusHistory); });
             foreach (HyprWindow window in clients)
             {
@@ -350,6 +365,19 @@ namespace CapriDesktop
                 parts.Add(monitor.Name + " Hypr " + monitor.X + "," + monitor.Y + " " + monitor.Width + "x" + monitor.Height + " scale " + monitor.Scale + " XWayland " + screen + " coordinate scale " + coordinateScales[i] + " XWayland scale " + xwaylandScales[i]);
             }
             return string.Join("; ", parts.ToArray());
+        }
+
+        internal override void Prioritize(ICollection<long> windows)
+        {
+            if (windows == null || windows.Count == 0 || clients == null) return;
+            HashSet<long> targets = new HashSet<long>(windows);
+            clients.Sort(delegate(HyprWindow a, HyprWindow b)
+            {
+                bool aTarget = targets.Contains(a.Handle);
+                bool bTarget = targets.Contains(b.Handle);
+                if (aTarget != bTarget) return aTarget ? -1 : 1;
+                return a.FocusHistory.CompareTo(b.FocusHistory);
+            });
         }
 
         private PixelRect FindAvaloniaScreen(HyprMonitor monitor)

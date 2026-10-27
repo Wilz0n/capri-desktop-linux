@@ -2,10 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Pipes;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Threading;
+using System.Text;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -26,6 +29,12 @@ namespace CapriDesktop
         [DataMember] internal double Size = 240;
         [DataMember] internal string Model;
         [DataMember] internal string Browser;
+        [DataMember] internal string OpenRouterKey;
+        [DataMember] internal string OpenRouterModel;
+        [DataMember] internal bool OpenRouterUseFreeRouter;
+        [DataMember] internal string ReplyLanguage;
+        [DataMember] internal string BrainProvider;
+        [DataMember] internal string BrainModel;
     }
 
     internal sealed class Clip
@@ -109,10 +118,12 @@ namespace CapriDesktop
         internal static readonly double[] Sizes = { 170, 240, 320, 440 };
         private static readonly string[] SizeNames = { "Small", "Medium", "Large", "Huge" };
         internal readonly Brain Brain = new Brain();
+        internal OpenRouterPool OpenRouter;
         internal readonly Talk Talk;
         internal Desk Desk;
         internal Func<string, string> Think;
         internal Settings Saved;
+        internal BrainPanel BrainPanel;
         private readonly IClassicDesktopStyleApplicationLifetime desktop;
         private readonly Clip idle = new Clip("idle", 16, 8, 1.11);
         private readonly Clip blink = new Clip("blink", 4, 8, 1.11);
@@ -152,6 +163,12 @@ namespace CapriDesktop
         private double nextCheck;
         private int asking;
         private Smoke smoke;
+        private volatile bool rescueStopped;
+        private DateTime rescueChecked;
+        private bool dictateOwned;
+        private bool transcribingOwned;
+        private bool transcribedFromVoice;
+        private DateTime dictateStopRequested;
 
         internal Pet(IClassicDesktopStyleApplicationLifetime desktop)
         {
@@ -159,6 +176,7 @@ namespace CapriDesktop
             Desk = Desk.Make(this);
             folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Capri");
             Saved = Program.Smoke != null ? new Settings() : Load();
+            if (OperatingSystem.IsLinux() && Program.Smoke == null) InitializeCloudProvider();
             Brain.LogPath = Path.Combine(Program.Smoke ?? folder, "errors.txt");
             Title = "Capri";
             SystemDecorations = SystemDecorations.None;
@@ -194,7 +212,7 @@ namespace CapriDesktop
                 catch (Exception error) { Lose(error); }
                 Place();
                 frames.Start();
-                FindBrain();
+                if (OpenRouter == null) FindBrain();
                 if (Program.Smoke != null) smoke = new Smoke(this, Program.Smoke);
             };
         }
@@ -275,24 +293,147 @@ namespace CapriDesktop
         {
             Screen screen = Screens.Primary ?? (Screens.All.Count > 0 ? Screens.All[0] : null);
             if (screen == null) return;
-            if (Saved.Placed && Screens.ScreenFromPoint(new PixelPoint(Saved.X + Px(body.Size / 2), Saved.Y + Px(body.Size / 2))) != null)
+            Screen savedScreen = Saved.Placed ? Screens.ScreenFromPoint(new PixelPoint(Saved.X + Px(body.Size / 2), Saved.Y + Px(body.Size / 2))) : null;
+            bool savedVisible = Saved.Placed && IntersectsDesk(Saved.X, Saved.Y);
+            if (savedScreen != null && savedVisible)
             {
                 Move(new PixelPoint(Saved.X, Saved.Y));
                 Fall();
                 return;
             }
-            PixelRect area = screen.WorkingArea;
-            Move(new PixelPoint(area.Right - Px(body.Size * PerchRight) - Px(40), area.Y));
+            screen = ScreenHere() ?? screen;
+            Move(RecoveryPosition(screen));
             Fall();
+        }
+
+        private PixelPoint RecoveryPosition(Screen screen)
+        {
+            PixelRect area = screen.WorkingArea;
+            int x = area.Right - Px(body.Size * PerchRight) - Px(40);
+            return ClampToWorkArea(new PixelPoint(x, area.Y), screen);
+        }
+
+        private bool IntersectsDesk(int x, int y)
+        {
+            if (Desk.Name == "Hyprland")
+            {
+                try
+                {
+                    List<HyprMonitor> monitors = Hypr.ParseMonitors(Hypr.Run("-j", "monitors"));
+                    return Hypr.AnchorVisible(x, y, Px(body.Size * 0.77 + 16), Px(body.Size * 1.12 + 16), monitors);
+                }
+                catch (Exception) { return false; }
+            }
+            int left = x + Px(FrameX);
+            int top = y + Px(FrameY);
+            int width = Px(body.Size * 0.77 + 16);
+            int height = Px(body.Size * 1.12 + 16);
+            foreach (Screen screen in Screens.All)
+            {
+                PixelRect area = screen.WorkingArea;
+                int overlapX = Math.Min(left + width, area.Right) - Math.Max(left, area.X);
+                int overlapY = Math.Min(top + height, area.Bottom) - Math.Max(top, area.Y);
+                if (overlapX >= Math.Min(width, Px(64)) && overlapY >= Math.Min(height, Px(64))) return true;
+            }
+            return false;
+        }
+
+        private PixelPoint ClampToWorkArea(PixelPoint point, Screen screen)
+        {
+            PixelRect area = screen.WorkingArea;
+            int frameLeft = Px(FrameX);
+            int frameTop = Px(FrameY);
+            int width = Px(body.Size * 0.77 + 16);
+            int height = Px(body.Size * 1.12 + 16);
+            int minX = area.X - frameLeft - width + Px(64);
+            int maxX = area.Right - frameLeft - Px(64);
+            int minY = area.Y - frameTop;
+            int maxY = area.Bottom - frameTop - Px(64);
+            return new PixelPoint(Math.Max(minX, Math.Min(maxX, point.X)), Math.Max(minY, Math.Min(maxY, point.Y)));
         }
 
         internal void Bring()
         {
             Screen screen = Screens.Primary ?? ScreenHere();
             if (screen == null) return;
+            BringToScreen(screen);
+        }
+
+        internal void BringToCurrentScreen()
+        {
+            Screen screen = ScreenHere() ?? Screens.Primary ?? (Screens.All.Count > 0 ? Screens.All[0] : null);
+            if (screen == null) return;
+            BringToScreen(screen);
+        }
+
+        internal void StartRescueListener()
+        {
+            if (string.IsNullOrEmpty(Program.RescueFile)) return;
+            rescueStopped = false;
+            rescueChecked = DateTime.UtcNow;
+            desktop.ShutdownRequested += delegate { rescueStopped = true; };
+            DispatcherTimer timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+            timer.Tick += delegate
+            {
+                if (rescueStopped) { timer.Stop(); return; }
+                if (DateTime.UtcNow - rescueChecked < TimeSpan.FromMilliseconds(150)) return;
+                rescueChecked = DateTime.UtcNow;
+                    try
+                    {
+                        if (!File.Exists(Program.RescueFile)) return;
+                        File.Delete(Program.RescueFile);
+                        BringToPrimaryScreen();
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            };
+            timer.Start();
+            Thread listener = new Thread(delegate()
+            {
+                while (!rescueStopped)
+                {
+                    try
+                    {
+                        using (NamedPipeServerStream pipe = new NamedPipeServerStream(Program.PipeName, PipeDirection.InOut, 2, PipeTransmissionMode.Byte, PipeOptions.None))
+                        {
+                            pipe.WaitForConnection();
+                            using (StreamReader reader = new StreamReader(pipe, Encoding.UTF8, false, 1024, true))
+                            using (StreamWriter writer = new StreamWriter(pipe, new UTF8Encoding(false), 1024, true))
+                            {
+                                string request = reader.ReadLine() ?? "";
+                                 string response = request == "rescue" ? "rescued" : "unknown";
+                                 writer.WriteLine(response);
+                                  writer.Flush();
+                                  if (request == "rescue") Dispatcher.UIThread.Post(BringToPrimaryScreen);
+                            }
+                        }
+                    }
+                    catch (IOException) { Thread.Sleep(100); }
+                    catch (ObjectDisposedException) { return; }
+                }
+            });
+            listener.IsBackground = true;
+            listener.Name = "Capri dictation IPC";
+            listener.Start();
+        }
+
+        private void BringToScreen(Screen screen)
+        {
             PixelRect area = screen.WorkingArea;
-            Move(new PixelPoint(area.X + area.Width / 2 - Px(body.Size / 2), area.Y));
-            Fall();
+            int x = area.X + area.Width / 2 - Px(body.Size * SitX);
+            int y = area.Y + Math.Min(Px(120), Math.Max(0, area.Height / 4));
+            Move(ClampToWorkArea(new PixelPoint(x, y), screen));
+            seat = null;
+            fallTo = null;
+            falling = false;
+            Save();
+        }
+
+        internal void BringToPrimaryScreen()
+        {
+            Screen screen = Screens.Primary ?? (Screens.All.Count > 0 ? Screens.All[0] : null);
+            if (screen == null) return;
+            BringToScreen(screen);
         }
 
         private void Tick()
@@ -308,6 +449,7 @@ namespace CapriDesktop
                 nextCheck = now + 0.25;
                 CheckSeat(now);
             }
+            UpdateDictation();
             Advance(now);
             Talk.Update(now);
             if (smoke != null) smoke.Tick(now);
@@ -494,6 +636,11 @@ namespace CapriDesktop
 
         internal void CheckSeat(double now)
         {
+            if (Program.Smoke == null && seat != null && !seat.Floor && !IntersectsDesk(anchor.X, anchor.Y))
+            {
+                BringToCurrentScreen();
+                return;
+            }
             if (seat == null || falling || dragging || seat.Floor) return;
             if (!Perches.Covered(Windows(), seat, Hip.X)) { coveredSince = -1; return; }
             if (coveredSince < 0) coveredSince = now;
@@ -574,9 +721,77 @@ namespace CapriDesktop
             Play(seat != null ? perchGlitch : glitch);
         }
 
+        internal void ToggleVoice()
+        {
+            if (!OperatingSystem.IsLinux())
+            {
+                NoVoice();
+                return;
+            }
+            if (Program.Smoke != null) { Talk.Answer("(voice)", "Voice input is disabled in the smoke test."); return; }
+            if (!Dictate.IsAvailable) { Talk.Answer("(voice)", "Voxtype isn't available right now. Check that its user service is running."); return; }
+            DictationState state = Dictate.ReadState();
+            if (state == DictationState.Idle)
+            {
+                if (!Dictate.Start()) { Talk.Answer("(voice)", "Voxtype couldn't start recording. Check its state and try again."); return; }
+                dictateOwned = true;
+                transcribingOwned = false;
+                Talk.SetVoiceState(DictationState.Recording);
+                Talk.Answer("(voice)", "Listening. Tap the wave again when you're done.");
+                return;
+            }
+            if (state == DictationState.Recording && dictateOwned)
+            {
+                if (!Dictate.Stop()) { Talk.Answer("(voice)", "Voxtype couldn't stop the recording. Try the wave again."); return; }
+                dictateOwned = false;
+                transcribingOwned = true;
+                dictateStopRequested = DateTime.UtcNow;
+                Talk.SetVoiceState(DictationState.Transcribing);
+                Talk.Answer("(voice)", "Transcribing…");
+                return;
+            }
+            if (state == DictationState.Recording || state == DictationState.Transcribing)
+            {
+                Talk.Answer("(voice)", "Voxtype is busy with another recording. I won't interrupt it.");
+                return;
+            }
+            Talk.Answer("(voice)", "Voxtype isn't idle. Wait for it to finish, then tap the wave.");
+        }
+
+        private void UpdateDictation()
+        {
+            if (!transcribingOwned || DateTime.UtcNow - dictateStopRequested < TimeSpan.FromMilliseconds(250) || Program.Smoke != null) return;
+            DictationState state = Dictate.ReadState();
+            if (state == DictationState.Transcribing) return;
+            if (state == DictationState.Idle)
+            {
+                string text = Dictate.ReadTranscript();
+                transcribingOwned = false;
+                Talk.SetVoiceState(DictationState.Idle);
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    transcribedFromVoice = true;
+                    if (OpenRouter == null || Brain.Model == null)
+                    {
+                        Talk.Answer("(voice)", "Heard: " + text + "\n\nConnect OpenRouter in Brain settings to let me respond to voice commands.");
+                        transcribedFromVoice = false;
+                    }
+                    else Talk.Submit(text);
+                }
+                else if (DateTime.UtcNow - dictateStopRequested > TimeSpan.FromMilliseconds(500)) Talk.Answer("(voice)", "I didn't catch any speech. Try again.");
+                return;
+            }
+            if (DateTime.UtcNow - dictateStopRequested > TimeSpan.FromSeconds(30))
+            {
+                transcribingOwned = false;
+                Talk.SetVoiceState(DictationState.Idle);
+                Talk.Answer("(voice)", "Voxtype didn't finish the transcription. You can try again.");
+            }
+        }
+
         internal void NoVoice()
         {
-            Talk.Answer("(voice)", "Voice chat isn't on Mac and Linux yet. Type to me for now, choom.");
+            Talk.Answer("(voice)", "Voice chat isn't available on this system yet. Type to me for now, choom.");
         }
 
         internal void Grab()
@@ -621,6 +836,10 @@ namespace CapriDesktop
             talk.Click += delegate { Talk.Open(); };
             MenuItem sit = new MenuItem { Header = "Sit here" };
             sit.Click += delegate { if (seat != null && seat.Free) StandUp(); else SitHere(); };
+            MenuItem bringHere = new MenuItem { Header = "Bring to current screen" };
+            bringHere.Click += delegate { BringToCurrentScreen(); };
+            MenuItem brainSettings = new MenuItem { Header = "Brain settings…" };
+            brainSettings.Click += delegate { ShowBrainPanel(); };
             MenuItem sizes = new MenuItem { Header = "Size" };
             for (int i = 0; i < Sizes.Length; i++)
             {
@@ -650,6 +869,8 @@ namespace CapriDesktop
             MenuItem quit = new MenuItem { Header = "Quit Capri" };
             quit.Click += delegate { Quit(); };
             menu.Items.Add(talk);
+            menu.Items.Add(bringHere);
+            menu.Items.Add(brainSettings);
             menu.Items.Add(sit);
             menu.Items.Add(sizes);
             menu.Items.Add(discord);
@@ -671,6 +892,8 @@ namespace CapriDesktop
 
         internal void FindBrain()
         {
+            if (OpenRouter != null) return;
+            if (OpenRouter != null) return;
             string saved = Saved.Model;
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -687,21 +910,46 @@ namespace CapriDesktop
             });
         }
 
+        internal void ShowBrainPanel()
+        {
+            if (BrainPanel == null) BrainPanel = new BrainPanel(this);
+            BrainPanel.Show();
+            BrainPanel.Activate();
+        }
+
+        private void InitializeCloudProvider()
+        {
+            string key = BrainSecretStore.Load("openrouter") ?? Saved.OpenRouterKey;
+            if (string.IsNullOrWhiteSpace(key)) return;
+            string selected = Saved.OpenRouterUseFreeRouter ? OpenRouterPool.FreeRouter : Saved.OpenRouterModel;
+            OpenRouter = new OpenRouterPool(key, selected == OpenRouterPool.FreeRouter ? new[] { OpenRouterPool.FreeRouter } : Saved.OpenRouterModel == null ? null : new[] { Saved.OpenRouterModel });
+            Brain.Model = OpenRouter.Models.FirstOrDefault();
+            Brain.Remote = null;
+        }
+
         internal void Hear(string text)
         {
             text = (text ?? "").Trim();
             if (text.Length == 0) return;
             if (text.Length > 240) text = text.Substring(0, 240);
+            bool voiceInput = transcribedFromVoice;
+            transcribedFromVoice = false;
             int ticket = ++asking;
             Brain.Cancel();
             string blocked = Safety.Screen(text);
             if (blocked != null) { Talk.Answer(text, blocked); return; }
             if (OperatingSystem.IsLinux() && Program.Smoke == null && Talk.ResolveMediaChoice(text)) return;
             Func<string, string> think = Think;
+            OpenRouterPool pool = OpenRouter;
             if (think == null)
             {
-                if (Brain.Model == null) { Talk.Answer(text, Offline); FindBrain(); return; }
-                think = Brain.Ask;
+                if (pool != null && !string.IsNullOrEmpty(Brain.Model))
+                    think = delegate(string words) { return AskOpenRouter(words, pool); };
+                else
+                {
+                    if (Brain.Model == null) { Talk.Answer(text, Offline); FindBrain(); return; }
+                    think = Brain.Ask;
+                }
             }
             Talk.Thinking(text);
             ThreadPool.QueueUserWorkItem(delegate
@@ -709,10 +957,70 @@ namespace CapriDesktop
                 string said;
                 try { said = Safety.Filter(think(text)); }
                 catch (BrainException error) { said = error.Message == Brain.Offline ? Offline : error.Told ? error.Message : "My brain couldn't answer: " + error.Message; }
-                catch (Exception error) { said = Brain.Explain(error) ?? "That reply was cancelled. Try again."; }
+                catch (Exception error) { said = voiceInput ? "I heard you, but couldn't get a brain response. Check Brain settings and try again." : Brain.Explain(error) ?? "That reply was cancelled. Try again."; }
                 if (string.IsNullOrWhiteSpace(said)) said = "My brain sent an empty reply. Try again.";
                 Dispatcher.UIThread.Post(delegate { if (ticket == asking) Talk.Answer(text, said); });
             });
+        }
+
+        private string AskOpenRouter(string text, OpenRouterPool pool)
+        {
+            string language = string.Equals(Saved.ReplyLanguage, "es", StringComparison.OrdinalIgnoreCase)
+                ? "\nReply in Spanish. Use natural, neutral Latin American Spanish. Keep the user's requested language only when they explicitly ask for another language."
+                : "";
+            List<ChatMessage> conversation = new List<ChatMessage> { new ChatMessage("system", Brain.Persona + Hands.Note + language) };
+            conversation.Add(new ChatMessage("user", text));
+            List<string> rawHistory = new List<string> { "{\"role\":\"system\",\"content\":" + OpenRouterWire.Quote(Brain.Persona + Hands.Note + language) + "}", "{\"role\":\"user\",\"content\":" + OpenRouterWire.Quote(text) + "}" };
+            for (int turn = 0; turn < 4; turn++)
+            {
+                OpenRouterResponse response;
+                try { response = OpenRouterWire.CompleteRaw(pool, rawHistory, true); }
+                catch (OpenRouterRequestException error) { throw new BrainException(OpenRouterPool.ErrorMessage(error.Status), true); }
+                if (response.Choices == null || response.Choices.Length == 0 || response.Choices[0].Message == null) throw new BrainException("OpenRouter returned no answer. Try again.", true);
+                if (!string.IsNullOrWhiteSpace(response.Model) && !string.Equals(pool.LastModel, response.Model, StringComparison.Ordinal))
+                {
+                    pool.LastModel = response.Model;
+                    Saved.OpenRouterModel = response.Model;
+                    Brain.Model = response.Model;
+                    Save();
+                }
+                OpenRouterMessage message = response.Choices[0].Message;
+                List<ToolCall> calls = new List<ToolCall>();
+                List<KeyValuePair<string, ToolArguments>> valid = new List<KeyValuePair<string, ToolArguments>>();
+                if (message.ToolCalls != null)
+                    foreach (OpenRouterToolCall call in message.ToolCalls)
+                    {
+                        if (call == null || call.Function == null || string.IsNullOrWhiteSpace(call.Function.Name)) continue;
+                        ToolArguments args = Hands.Read(call.Function.Arguments);
+                        if (!Hands.Valid(call.Function.Name, args)) continue;
+                        ToolFunction function = new ToolFunction { Name = call.Function.Name, Arguments = args };
+                        calls.Add(new ToolCall { Function = function });
+                        valid.Add(new KeyValuePair<string, ToolArguments>(call.Function.Name, args));
+                }
+                if (valid.Count == 0) return message.Content ?? "OpenRouter returned an empty answer.";
+                rawHistory.Add(OpenRouterWire.ToolCallMessage(message.Content, FilterToolCalls(message.ToolCalls, valid)));
+                int resultCount = 0;
+                foreach (OpenRouterToolCall call in message.ToolCalls)
+                {
+                    if (resultCount++ >= 3) break;
+                    if (call == null || call.Function == null || string.IsNullOrEmpty(call.Id)) continue;
+                    ToolArguments args = Hands.Read(call.Function.Arguments);
+                    if (!Hands.Valid(call.Function.Name, args)) continue;
+                    string result = Hands.Do(call.Function.Name, args);
+                    rawHistory.Add(OpenRouterWire.ToolResult(call.Id, result));
+                }
+                if (turn == 3) return string.Join(" ", valid.ConvertAll(delegate(KeyValuePair<string, ToolArguments> call) { return call.Key; }).ToArray());
+            }
+            return "OpenRouter reached the tool-call limit for this request.";
+        }
+
+        private static List<OpenRouterToolCall> FilterToolCalls(OpenRouterToolCall[] calls, List<KeyValuePair<string, ToolArguments>> valid)
+        {
+            List<OpenRouterToolCall> found = new List<OpenRouterToolCall>();
+            if (calls == null) return found;
+            foreach (OpenRouterToolCall call in calls)
+                if (call != null && call.Function != null && valid.Exists(delegate(KeyValuePair<string, ToolArguments> item) { return item.Key == call.Function.Name; })) found.Add(call);
+            return found;
         }
 
         private Settings Load()

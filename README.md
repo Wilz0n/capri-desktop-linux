@@ -69,12 +69,80 @@ Windows or your antivirus may warn you because it's a new app. All the code is h
 
 ## Mac and Linux (early preview)
 
-She sits on your windows and chats. Voice, the Mainframe and doing things for you are Windows-only for now.
+Mac and the upstream Linux release remain early previews. The Linux/Hyprland setup described below is the development setup used for Capri's Linux voice, OpenRouter Brain and desktop integration; it requires the Linux Capri build from this repository rather than the older upstream tarball.
 
 1. Download [Mac (Apple Silicon)](https://github.com/lachydotmcg/capri-desktop/releases/latest/download/Capri-mac-apple-silicon.zip), [Mac (Intel)](https://github.com/lachydotmcg/capri-desktop/releases/latest/download/Capri-mac-intel.zip) or [Linux](https://github.com/lachydotmcg/capri-desktop/releases/latest/download/Capri-linux-x64.tar.gz)
 2. Install [Ollama](https://ollama.com), then run `ollama pull gemma4:e4b` for her brain
 3. **Mac:** unzip it and open Capri. If macOS says it can't check her, open System Settings → Privacy & Security and click **Open Anyway**. Needs macOS 15 or newer
-4. **Linux:** unpack it and run `Capri/Capri`. She sits on windows on X11; on Wayland she sits on the bottom of your screen
+4. **Linux upstream preview:** unpack it and run `Capri/Capri`. It sits on windows on X11; on Wayland it sits at the bottom of your screen. The additional Linux features below are in this repository's Linux build.
+
+### Linux/Hyprland setup and migration
+
+This section describes the current development configuration so the Linux setup can be recreated on another computer. It is not a one-click installer: copy the repository/build and configure each machine's compositor and services locally.
+
+#### Requirements
+
+- 64-bit Linux, .NET 10 SDK to build from source, and a Wayland session using Hyprland 0.55+ (the current development setup uses Hyprland 0.56.2).
+- Voxtype installed as a **user** service, configured with a working microphone and Whisper model. The current setup uses local Whisper `large-v3-turbo`, Spanish (`es`), a `type` output mode, and an enabled Voxtype state file. Choose/download the Whisper model on the destination machine as appropriate.
+- `playerctl` and `wpctl` for the optional Linux media controls; `notify-send` for recording status notices.
+- A mic and internet access for local transcription input plus the cloud Brain. OpenRouter is optional if only local dictation is needed.
+
+#### Build and launch Capri
+
+From the repository root:
+
+```sh
+dotnet build cross/Capri.Cross.csproj -c Release
+dotnet publish cross/Capri.Cross.csproj -c Release -r linux-x64 --self-contained \
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+  -p:DebugType=none -o out/Capri
+```
+
+Launch `out/Capri/Capri`. Keep the executable and its resources together when not using single-file publishing. Capri stores ordinary preferences in its user config folder and the OpenRouter key separately in `$XDG_CONFIG_HOME/Capri/openrouter.key` (normally `~/.config/Capri/openrouter.key`, mode `0600`). Do not commit or copy that key in a repository, `cross.json`, logs, screenshots, or this guide. On a new device, open the Capri tray menu → **Brain settings…** and enter that device's own key.
+
+#### Brain: OpenRouter free-only setup
+
+1. Open **Brain settings…** from Capri's tray menu.
+2. Enter an OpenRouter API key, select a currently supported `:free` model, choose a reply language, and press **Connect**. The key is stored locally with owner-only file permissions.
+3. The configured model is checked against Capri's built-in free-model allowlist before use. Ordered model IDs retain the `:free` suffix; no local paid-model fallback is used. `openrouter/free` is an optional standalone mode and is not mixed into the ordered model list.
+4. Verify the panel shows **Connected** and send one ordinary, non-private prompt. A tool action is only successful after Capri executes it; do not assume that model text alone means an action happened.
+
+Free model availability and limits can change. A `:free` model may be temporarily rate-limited or unavailable; wait and retry rather than substituting a paid model. Never paste a key into a terminal command or ask an assistant to print it.
+
+#### Voice: Capri Wave button vs. global Voxtype hotkey
+
+These are deliberately separate paths:
+
+- **Capri's Wave button:** Capri checks Voxtype's state, starts a recording to `$XDG_RUNTIME_DIR/capri/voice.txt` with directory mode `0700`, stops only a recording it started, waits for transcription, consumes the text once, then sends it through Capri's normal safety/media/Brain pipeline. The on-screen Wave changes to listening/transcribing. If OpenRouter is not connected, Capri reports the recognized text and asks for Brain setup rather than claiming it answered.
+- **Global Voxtype shortcut:** in the current personal Hyprland setup, `Super + Ctrl + G` is the normal standalone `voxtype record toggle`. It types the recognized text into whichever field currently has focus. It does **not** send that text to Capri. There is intentionally no paired `Super + Alt + G` binding in this setup; the toggle key starts or stops based on Voxtype's state. If a destination device uses a separate start/stop pair, configure it according to that device's Voxtype documentation, keeping it separate from Capri's Wave flow.
+
+Voxtype settings are machine-specific and intentionally are not modified by Capri's installer. Confirm the daemon is active (`systemctl --user status voxtype.service`) and the state file is `idle` before testing. Test global typing in a harmless text field first; test the Wave button separately. Do not trigger a hotkey while another Voxtype recording is active: Capri's button will not stop a recording it did not start.
+
+The Wave button uses Voxtype's CLI directly. Its output goes to Capri's private runtime inbox, and Capri polls the state file to avoid consuming partial or duplicate transcripts. The runtime inbox is temporary and is not a migration target; create it automatically on the new session. Do not copy another computer's `/run/user/...` files.
+
+#### Hyprland: hidden border for Capri only
+
+For Hyprland 0.55+ (Lua configuration), this persistent per-window rule hides only Capri's compositor border while preserving global border settings and normal input:
+
+### Capri without Hyprland's window outline
+
+On Hyprland 0.55+ (Lua configuration), you can hide the compositor border for Capri only while keeping the normal border width and colors for all other windows. Add this to `~/.config/hypr/hyprland.lua` or to a Lua file it loads:
+
+```lua
+hl.window_rule({ name = "capri-no-outline", match = { class = "^Capri$" }, border_size = 0 })
+```
+
+Add the rule to `~/.config/hypr/hyprland.lua` or a Lua module it loads, then run `hyprctl reload`. The anchored class match is intentionally scoped; do not set transparent border colors or `border_size = 0` globally. Check the actual class on a new machine with `hyprctl clients -j` and adjust the regex only if that class differs. The rule persists across Capri restarts.
+
+For Capri's rescue binding, the personal Hyprland setup uses `Super + Shift + C` → `capri --rescue`. It only works when the running Capri process has the rescue IPC listener. If Capri is off-screen, check `hyprctl clients -j` and the registered binding with `hyprctl binds -j`; do not blindly move or close other windows. Use the running process's tray action/menu or the rescue helper, and verify the resulting position afterward.
+
+#### What to migrate (and what not to)
+
+- Migrate the Capri source/build instructions, the destination device's personal Hyprland Lua rule/bindings, and a freshly configured Voxtype service/model.
+- Re-enter the OpenRouter key on the destination through Capri's Brain settings; do not copy secrets as part of source control or documentation.
+- Do **not** copy runtime state such as `$XDG_RUNTIME_DIR/voxtype/state` or `$XDG_RUNTIME_DIR/capri/voice.txt`.
+- Do **not** overwrite the destination's `~/.config/voxtype/config.toml` or all of `~/.config/hypr`; add only the needed personal bindings/rule.
+- `plan.md` in this development checkout is a local planning file, not a portable setup guide. This README section is the human-facing migration note.
 
 ## How to use her
 
