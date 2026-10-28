@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
@@ -32,6 +33,8 @@ namespace CapriDesktop
         [DataMember] internal string OpenRouterKey;
         [DataMember] internal string OpenRouterModel;
         [DataMember] internal bool OpenRouterUseFreeRouter;
+        [DataMember] internal string GeminiModel;
+        [DataMember] internal string BrainOrder;
         [DataMember] internal string ReplyLanguage;
         [DataMember] internal string BrainProvider;
         [DataMember] internal string BrainModel;
@@ -119,6 +122,8 @@ namespace CapriDesktop
         private static readonly string[] SizeNames = { "Small", "Medium", "Large", "Huge" };
         internal readonly Brain Brain = new Brain();
         internal OpenRouterPool OpenRouter;
+        internal GeminiPool Gemini;
+        internal static Func<string, string> GeminiRawJsonOverrideForTests;
         internal readonly Talk Talk;
         internal Desk Desk;
         internal Func<string, string> Think;
@@ -771,9 +776,9 @@ namespace CapriDesktop
                 if (!string.IsNullOrWhiteSpace(text))
                 {
                     transcribedFromVoice = true;
-                    if (OpenRouter == null || Brain.Model == null)
+                    if (OpenRouter == null && Gemini == null)
                     {
-                        Talk.Answer("(voice)", "Heard: " + text + "\n\nConnect OpenRouter in Brain settings to let me respond to voice commands.");
+                        Talk.Answer("(voice)", "Heard: " + text + "\n\nConnect Gemini or OpenRouter in Brain settings to let me respond to voice commands.");
                         transcribedFromVoice = false;
                     }
                     else Talk.Submit(text);
@@ -924,14 +929,23 @@ namespace CapriDesktop
         private void InitializeCloudProvider()
         {
             string key = BrainSecretStore.Load("openrouter") ?? Saved.OpenRouterKey;
-            if (string.IsNullOrWhiteSpace(key)) return;
-            string selected = Saved.OpenRouterUseFreeRouter ? OpenRouterPool.FreeRouter : Saved.OpenRouterModel;
-            OpenRouter = OpenRouterPool.Automatic(key, Saved.OpenRouterUseFreeRouter ? null : selected);
-            Saved.OpenRouterUseFreeRouter = false;
-            Saved.OpenRouterModel = OpenRouter.Models.FirstOrDefault() ?? selected;
-            Brain.Model = OpenRouter.Models.FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(key))
+            {
+                string selected = Saved.OpenRouterUseFreeRouter ? OpenRouterPool.FreeRouter : Saved.OpenRouterModel;
+                OpenRouter = OpenRouterPool.Automatic(key, Saved.OpenRouterUseFreeRouter ? null : selected);
+                Saved.OpenRouterUseFreeRouter = false;
+                Saved.OpenRouterModel = OpenRouter.Models.FirstOrDefault() ?? selected;
+                Brain.Model = OpenRouter.Models.FirstOrDefault();
+            }
+            string geminiKey = BrainSecretStore.Load("gemini");
+            if (string.IsNullOrEmpty(Saved.GeminiModel) || string.Equals(Saved.GeminiModel, "gemini-3.8-flash", StringComparison.Ordinal))
+            {
+                Saved.GeminiModel = GeminiPool.DefaultModel;
+                Save();
+            }
+            if (!string.IsNullOrWhiteSpace(geminiKey)) Gemini = new GeminiPool(geminiKey, Saved.GeminiModel);
             Brain.Remote = null;
-            RefreshOpenRouterQuota(OpenRouter);
+            if (OpenRouter != null) RefreshOpenRouterQuota(OpenRouter);
         }
 
         internal void RefreshOpenRouterQuota(OpenRouterPool pool)
@@ -943,14 +957,57 @@ namespace CapriDesktop
                 {
                     OpenRouterDailyQuota quota = OpenRouterWire.GetQuota(pool.Key);
                     if (quota == null) return;
+                    bool wasBlocked = pool.IsBlocked;
                     pool.SetDailyQuota(quota.Used, quota.Limit, quota.Remaining);
+                    if (Program.Smoke != null) return;
                     Dispatcher.UIThread.Post(delegate
                     {
                         if (BrainPanel != null && BrainPanel.IsVisible) BrainPanel.UpdateQuota(pool.QuotaText());
+                        if (wasBlocked && !pool.IsBlocked) Talk.Answer("(brain)", "OpenRouter's free quota is available again.");
                     });
                 }
                 catch (Exception) { }
             });
+        }
+
+        private string AskProviders(string text)
+        {
+            List<string> providers = string.Equals(Saved.BrainOrder, "openrouter-first", StringComparison.OrdinalIgnoreCase)
+                ? new List<string> { "openrouter", "gemini" }
+                : new List<string> { "gemini", "openrouter" };
+            List<string> failures = new List<string>();
+            bool actionExecuted = false;
+            string actionReply = null;
+            foreach (string provider in providers)
+            {
+                bool providerActionExecuted = false;
+                string providerActionReply = null;
+                try
+                {
+                    if (provider == "gemini" && Gemini != null && Gemini.IsConfigured)
+                    {
+                        if (Gemini.IsBlocked) { failures.Add(Gemini.StatusText()); continue; }
+                        return AskGemini(text, Gemini, delegate(string action) { providerActionExecuted = true; providerActionReply = action; actionExecuted = true; actionReply = action; });
+                    }
+                    if (provider == "openrouter" && OpenRouter != null)
+                    {
+                        OpenRouter.RefreshBlockedQuota();
+                        if (OpenRouter.IsBlocked) { failures.Add(OpenRouterPool.DailyLimitMessage(OpenRouter.BlockedUntil)); continue; }
+                        return AskOpenRouter(text, OpenRouter, delegate(string action) { providerActionExecuted = true; providerActionReply = action; actionExecuted = true; actionReply = action; });
+                    }
+                }
+                catch (BrainException error)
+                {
+                    if (actionExecuted) return providerActionExecuted ? providerActionReply ?? "The requested action was completed." : actionReply ?? "The requested action was completed.";
+                    failures.Add(error.Message);
+                }
+                catch (Exception error)
+                {
+                    if (actionExecuted) return providerActionExecuted ? providerActionReply ?? "The requested action was completed." : actionReply ?? "The requested action was completed.";
+                    failures.Add(provider == "gemini" ? "Gemini: " + error.Message : "OpenRouter: " + error.Message);
+                }
+            }
+            throw new BrainException(failures.Count == 0 ? "Connect Gemini or OpenRouter in Brain settings." : string.Join("\n", failures), true);
         }
 
         internal void Hear(string text)
@@ -966,16 +1023,10 @@ namespace CapriDesktop
             if (blocked != null) { Talk.Answer(text, blocked); return; }
             if (OperatingSystem.IsLinux() && Program.Smoke == null && Talk.ResolveMediaChoice(text)) return;
             Func<string, string> think = Think;
-            OpenRouterPool pool = OpenRouter;
-            if (pool != null && pool.IsBlocked)
-            {
-                Talk.Answer(text, OpenRouterPool.DailyLimitMessage(pool.BlockedUntil));
-                return;
-            }
             if (think == null)
             {
-                if (pool != null && !string.IsNullOrEmpty(Brain.Model))
-                    think = delegate(string words) { return AskOpenRouter(words, pool); };
+                if (OpenRouter != null || Gemini != null)
+                    think = AskProviders;
                 else
                 {
                     if (Brain.Model == null) { Talk.Answer(text, Offline); FindBrain(); return; }
@@ -994,13 +1045,11 @@ namespace CapriDesktop
             });
         }
 
-        private string AskOpenRouter(string text, OpenRouterPool pool)
+        private string AskOpenRouter(string text, OpenRouterPool pool, Action<string> actionCompleted = null)
         {
             string language = string.Equals(Saved.ReplyLanguage, "es", StringComparison.OrdinalIgnoreCase)
                 ? "\nReply in Spanish. Use natural, neutral Latin American Spanish. Keep the user's requested language only when they explicitly ask for another language."
                 : "";
-            List<ChatMessage> conversation = new List<ChatMessage> { new ChatMessage("system", Brain.Persona + Hands.Note + language) };
-            conversation.Add(new ChatMessage("user", text));
             List<string> rawHistory = new List<string> { "{\"role\":\"system\",\"content\":" + OpenRouterWire.Quote(Brain.Persona + Hands.Note + language) + "}", "{\"role\":\"user\",\"content\":" + OpenRouterWire.Quote(text) + "}" };
             for (int turn = 0; turn < 4; turn++)
             {
@@ -1010,7 +1059,10 @@ namespace CapriDesktop
                 {
                     if (error.DailyLimit || pool.IsBlocked) throw new BrainException(OpenRouterPool.DailyLimitMessage(pool.BlockedUntil == DateTime.MinValue ? OpenRouterPool.NextDailyResetUtc(DateTime.UtcNow) : pool.BlockedUntil), true);
                     if (error.Status == 429 && error.RetryAfterSeconds > 0) throw new BrainException("OpenRouter is temporarily rate-limited. Wait " + error.RetryAfterSeconds + " seconds and try again.", true);
-                    throw new BrainException(OpenRouterPool.ErrorMessage(error.Status), true);
+                    string errorText = OpenRouterPool.ErrorMessage(error.Status);
+                    if (!string.IsNullOrWhiteSpace(error.UserMessage)) errorText += " Details: " + error.UserMessage;
+                    BrainErrorLog.Write("OpenRouter HTTP " + error.Status + " detail=" + (error.UserMessage ?? error.Message));
+                    throw new BrainException(errorText, true);
                 }
                 if (turn == 0) RefreshOpenRouterQuota(pool);
                 if (response.Choices == null || response.Choices.Length == 0 || response.Choices[0].Message == null) throw new BrainException("OpenRouter returned no answer. Try again.", true);
@@ -1038,11 +1090,69 @@ namespace CapriDesktop
                     ToolArguments args = Hands.Read(call.Function.Arguments);
                     if (!Hands.Valid(call.Function.Name, args)) continue;
                     string result = Hands.Do(call.Function.Name, args);
+                    if (actionCompleted != null) actionCompleted(result);
                     rawHistory.Add(OpenRouterWire.ToolResult(call.Id, result));
                 }
                 if (turn == 3 || pool.DailyRemaining >= 0 && pool.DailyRemaining <= 5) return string.Join(" ", valid.ConvertAll(delegate(KeyValuePair<string, ToolArguments> call) { return call.Key; }).ToArray());
             }
             return "OpenRouter reached the tool-call limit for this request.";
+        }
+
+        private string AskGemini(string text, GeminiPool pool, Action<string> actionCompleted = null)
+        {
+            string language = string.Equals(Saved.ReplyLanguage, "es", StringComparison.OrdinalIgnoreCase)
+                ? "\nReply in Spanish. Use natural, neutral Latin American Spanish."
+                : "";
+            List<string> history = new List<string>
+            {
+                "{\"role\":\"system\",\"content\":" + OpenRouterWire.Quote(Brain.Persona + Hands.Note + language) + "}",
+                "{\"role\":\"user\",\"content\":" + OpenRouterWire.Quote(text) + "}"
+            };
+            for (int turn = 0; turn < 4; turn++)
+            {
+                OpenRouterResponse response;
+                try { response = pool.CompleteRaw(history, true); }
+                catch (GeminiException error)
+                {
+                    if (error.DailyLimit || pool.IsBlocked) throw new BrainException("Gemini free quota exhausted until " + pool.BlockedUntil.ToLocalTime().ToString("h:mm tt") + " Pacific time.", true);
+                    if (error.Status == 401 || error.Status == 403) throw new BrainException("Gemini rejected the API key. Check Brain settings.", true);
+                    if (pool.LastErrorModel != null && pool.LastRetryAt > DateTime.UtcNow) Dispatcher.UIThread.Post(delegate { if (BrainPanel != null && BrainPanel.IsVisible) BrainPanel.UpdateProviderStatus(); });
+                    string details = error.UserMessage ?? error.Message;
+                    BrainErrorLog.Write("Gemini HTTP " + error.Status + " model=" + (error.Model ?? pool.LastErrorModel ?? "unknown") + " detail=" + details);
+                    throw new BrainException("Gemini HTTP " + error.Status + (string.IsNullOrWhiteSpace(error.UserMessage) ? " request failed." : ": " + error.UserMessage), true);
+                }
+                if (turn == 0) Dispatcher.UIThread.Post(delegate { if (BrainPanel != null && BrainPanel.IsVisible) BrainPanel.UpdateProviderStatus(); });
+                OpenRouterMessage message = response.Choices[0].Message;
+                if (message.ToolCalls == null || message.ToolCalls.Length == 0) return message.Content ?? "Gemini returned an empty answer.";
+                List<OpenRouterToolCall> valid = new List<OpenRouterToolCall>();
+                foreach (OpenRouterToolCall call in message.ToolCalls)
+                {
+                    if (call == null || call.Function == null || string.IsNullOrWhiteSpace(call.Function.Name)) continue;
+                    ToolArguments args = Hands.Read(call.Function.Arguments);
+                    if (!Hands.Valid(call.Function.Name, args)) continue;
+                    if (string.IsNullOrWhiteSpace(call.Id)) call.Id = "gemini_call_" + valid.Count;
+                    valid.Add(call);
+                }
+                if (valid.Count == 0) return message.Content ?? "Gemini returned an empty answer.";
+                string rawAssistant = ExtractAssistantMessage(response.Choices[0].Message);
+                if (!string.IsNullOrWhiteSpace(pool.LastRawResponse))
+                {
+                    string extracted = ExtractRawAssistantMessage(pool.LastRawResponse);
+                    if (!string.IsNullOrWhiteSpace(extracted)) rawAssistant = extracted;
+                }
+                history.Add(OpenRouterWire.ToolCallMessage(rawAssistant));
+                int resultCount = 0;
+                foreach (OpenRouterToolCall call in valid)
+                {
+                    if (resultCount++ >= 3) break;
+                    ToolArguments args = Hands.Read(call.Function.Arguments);
+                    string result = Hands.Do(call.Function.Name, args);
+                    if (actionCompleted != null) actionCompleted(result);
+                    history.Add(OpenRouterWire.ToolResult(call.Id, result));
+                }
+                if (turn == 3) return string.Join(" ", valid.ConvertAll(delegate(OpenRouterToolCall call) { return call.Function.Name; }).ToArray());
+            }
+            return "Gemini reached the tool-call limit for this request.";
         }
 
         private static List<OpenRouterToolCall> FilterToolCalls(OpenRouterToolCall[] calls, List<KeyValuePair<string, ToolArguments>> valid)
@@ -1052,6 +1162,35 @@ namespace CapriDesktop
             foreach (OpenRouterToolCall call in calls)
                 if (call != null && call.Function != null && valid.Exists(delegate(KeyValuePair<string, ToolArguments> item) { return item.Key == call.Function.Name; })) found.Add(call);
             return found;
+        }
+
+        private static string ExtractAssistantMessage(OpenRouterMessage message)
+        {
+            StringBuilder json = new StringBuilder("{\"role\":\"assistant\",\"content\":");
+            json.Append(message.Content == null ? "null" : OpenRouterWire.Quote(message.Content)).Append(",\"tool_calls\":[");
+            OpenRouterToolCall[] calls = message.ToolCalls ?? new OpenRouterToolCall[0];
+            for (int i = 0; i < calls.Length; i++)
+            {
+                if (i > 0) json.Append(',');
+                OpenRouterToolCall call = calls[i];
+                json.Append("{\"id\":").Append(OpenRouterWire.Quote(call.Id ?? "gemini_call_" + i.ToString(CultureInfo.InvariantCulture)))
+                    .Append(",\"type\":\"function\",\"function\":{\"name\":").Append(OpenRouterWire.Quote(call.Function.Name))
+                    .Append(",\"arguments\":").Append(OpenRouterWire.Quote(call.Function.Arguments ?? "{}" )).Append("}}");
+                if (call.ExtraContent != null && call.ExtraContent.Google != null && !string.IsNullOrWhiteSpace(call.ExtraContent.Google.ThoughtSignature))
+                    json.Insert(json.Length - 1, ",\"extra_content\":{\"google\":{\"thought_signature\":" + OpenRouterWire.Quote(call.ExtraContent.Google.ThoughtSignature) + "}}");
+            }
+            return json.Append("]}").ToString();
+        }
+
+        private static string ExtractRawAssistantMessage(string responseJson)
+        {
+            try
+            {
+                using (MemoryStream stream = new MemoryStream(Encoding.UTF8.GetBytes(responseJson)))
+                using (System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(stream))
+                    return document.RootElement.GetProperty("choices")[0].GetProperty("message").GetRawText();
+            }
+            catch (Exception) { return null; }
         }
 
         private Settings Load()

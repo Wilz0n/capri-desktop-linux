@@ -5,6 +5,9 @@ using System.IO;
 using System.Net;
 using System.Text;
 using System.Globalization;
+using System.Threading;
+using System.Text.RegularExpressions;
+using System.Linq;
 
 namespace CapriDesktop
 {
@@ -81,34 +84,43 @@ namespace CapriDesktop
             }
             string[] models = OpenRouterPool.WithoutRouter(pool.Models);
             if (models.Length == 0) throw new InvalidOperationException("No verified free models are configured.");
-            string body = BuildPoolJson(models, messages, true, maxTokens);
-            try
+            OpenRouterRequestException last = null;
+            for (int offset = 0; offset < models.Length; offset += 3)
             {
-                OpenRouterResponse response = OpenRouterPool.ParseResponse(Send(pool.Key, body));
-                if (response.Error != null) throw new OpenRouterRequestException(response.Error.Code, response.Error.Message);
-                if (response.Choices == null || response.Choices.Length == 0 || response.Choices[0].Message == null) throw new OpenRouterRequestException(502, "Empty response.");
-                if (!OpenRouterPool.IsFreeModel(response.Model) || !models.Contains(response.Model, StringComparer.OrdinalIgnoreCase)) throw new OpenRouterRequestException(402, "Unverified or non-free model response rejected.");
-                pool.LastModel = response.Model;
-                if (pool.DailyRemaining > 0) pool.DailyRemaining--;
-                if (pool.DailyUsed >= 0) pool.DailyUsed++;
-                return response;
-            }
-            catch (OpenRouterRequestException error)
-            {
-                if (error.DailyLimit || IsDailyLimit(error))
+                string[] batch = models.Skip(offset).Take(3).ToArray();
+                try
                 {
-                    DateTime reset = error.ResetAtUtc ?? OpenRouterPool.NextDailyResetUtc(DateTime.UtcNow);
-                    pool.BlockDaily(reset);
-                    throw new OpenRouterRequestException(429, "free-model-daily-limit", pool.BlockedUntil, true);
+                    string body = BuildPoolJson(batch, messages, true, maxTokens);
+                    OpenRouterResponse response = OpenRouterPool.ParseResponse(Send(pool.Key, body));
+                    if (response.Error != null) throw new OpenRouterRequestException(response.Error.Code, response.Error.Message);
+                    if (response.Choices == null || response.Choices.Length == 0 || response.Choices[0].Message == null) throw new OpenRouterRequestException(502, "Empty response.");
+                    if (!OpenRouterPool.IsFreeModel(response.Model) || !pool.Models.Contains(response.Model, StringComparer.OrdinalIgnoreCase)) throw new OpenRouterRequestException(402, "Unverified or non-free model response rejected.");
+                    pool.LastModel = response.Model;
+                    if (pool.DailyRemaining > 0) pool.DailyRemaining--;
+                    if (pool.DailyUsed >= 0) pool.DailyUsed++;
+                    return response;
                 }
+                catch (OpenRouterRequestException error)
+                {
+                    last = error;
+                    if (error.DailyLimit || IsDailyLimit(error))
+                    {
+                        DateTime reset = error.ResetAtUtc ?? OpenRouterPool.NextDailyResetUtc(DateTime.UtcNow);
+                        pool.BlockDaily(reset);
+                        pool.LastQuotaCheck = DateTime.UtcNow.AddMinutes(-6);
+                        throw new OpenRouterRequestException(429, "free-model-daily-limit", pool.BlockedUntil, true);
+                    }
                     if (error.Status == 402 || error.Status == 401 || error.Status == 403) throw;
-                if (error.Status == 429)
-                {
-                    int retry = error.RetryAfterSeconds > 0 ? error.RetryAfterSeconds : 60;
-                    throw new OpenRouterRequestException(429, "free-model-rate-limit", DateTime.UtcNow.AddSeconds(retry), false, retry);
+                    if (!OpenRouterPool.Retryable(error.Status, error.Status)) throw;
+                    if (error.Status == 400) throw new OpenRouterRequestException(400, error.Body);
+                    if (error.Status == 429 && offset + 3 >= models.Length)
+                    {
+                        int retry = error.RetryAfterSeconds > 0 ? error.RetryAfterSeconds : 60;
+                        throw new OpenRouterRequestException(429, error.Body, error.ResetAtUtc ?? DateTime.UtcNow.AddSeconds(retry), false, retry);
+                    }
                 }
-                throw;
             }
+            throw last ?? new OpenRouterRequestException(503, "All verified free model groups were unavailable.");
         }
 
         internal static OpenRouterDailyQuota GetQuota(string key)
@@ -129,6 +141,20 @@ namespace CapriDesktop
                 OpenRouterQuotaResponse response = (OpenRouterQuotaResponse)new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(OpenRouterQuotaResponse)).ReadObject(stream);
                 return response == null || response.Data == null ? null : response.Data.FreeModelDailyRequests;
             }
+        }
+
+        internal static void RefreshQuota(OpenRouterPool pool)
+        {
+            if (pool == null || string.IsNullOrWhiteSpace(pool.Key)) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    OpenRouterDailyQuota quota = GetQuota(pool.Key);
+                    if (quota != null) pool.SetDailyQuota(quota.Used, quota.Limit, quota.Remaining);
+                }
+                catch (Exception) { }
+            });
         }
 
         private static string Get(string key, string endpoint)
@@ -154,6 +180,7 @@ namespace CapriDesktop
         {
             string[] ids = OpenRouterPool.WithoutRouter(models);
             if (ids.Length == 0) throw new InvalidOperationException("Only verified free model IDs can enter the ordered fallback array.");
+            if (ids.Length > 3) throw new InvalidOperationException("OpenRouter supports at most three models per request.");
             for (int i = 0; i < ids.Length; i++) if (!OpenRouterPool.IsFreeModel(ids[i])) throw new InvalidOperationException("Only verified free model IDs can enter the ordered fallback array.");
             StringBuilder body = new StringBuilder("{\"models\":").Append(JsonArray(ids)).Append(",\"messages\":[").Append(JoinMessages(messages)).Append("],\"stream\":false,\"max_tokens\":").Append(Math.Max(1, maxTokens));
             if (tools) body.Append(",\"tools\":").Append(Hands.Tools).Append(",\"tool_choice\":\"auto\"");
@@ -210,8 +237,18 @@ namespace CapriDesktop
                 if (i > 0) result.Append(',');
                 OpenRouterToolCall call = calls[i];
                 result.Append("{\"id\":").Append(Quote(call.Id)).Append(",\"type\":\"function\",\"function\":{\"name\":").Append(Quote(call.Function.Name)).Append(",\"arguments\":").Append(Quote(call.Function.Arguments)).Append("}}");
+                if (call.ExtraContent != null && call.ExtraContent.Google != null && !string.IsNullOrWhiteSpace(call.ExtraContent.Google.ThoughtSignature))
+                    result.Insert(result.Length - 1, ",\"extra_content\":{\"google\":{\"thought_signature\":" + Quote(call.ExtraContent.Google.ThoughtSignature) + "}}");
             }
             return result.Append("]}").ToString();
+        }
+
+        internal static string ToolCallMessage(string rawAssistantMessage)
+        {
+            if (string.IsNullOrWhiteSpace(rawAssistantMessage)) throw new ArgumentException("Assistant tool-call message is empty.");
+            string trimmed = rawAssistantMessage.Trim();
+            if (!trimmed.StartsWith("{", StringComparison.Ordinal) || !trimmed.Contains("\"tool_calls\"")) throw new ArgumentException("Assistant tool-call message is not valid tool-call JSON.");
+            return trimmed;
         }
 
         private static string SerializeMessage(ChatMessage message)
@@ -272,7 +309,11 @@ namespace CapriDesktop
                 string body = "";
                 using (response)
                 using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8)) body = reader.ReadToEnd();
-                throw new OpenRouterRequestException(status, body, ParseReset(resetHeader), IsDailyLimitBody(status, body), ParseRetryAfter(retryAfter));
+                string safeMessage = null;
+                try { OpenRouterApiError apiError = OpenRouterPool.ParseResponse(body).Error; safeMessage = apiError == null ? null : apiError.Message; }
+                catch (Exception) { }
+                string safeBody = safeMessage == null ? body : "{\"error\":{\"code\":" + status.ToString(CultureInfo.InvariantCulture) + ",\"message\":" + Quote(safeMessage) + "}}";
+                throw new OpenRouterRequestException(status, safeBody, ParseReset(resetHeader), IsDailyLimitBody(status, body), ParseRetryAfter(retryAfter));
             }
         }
 
@@ -338,6 +379,7 @@ namespace CapriDesktop
         internal readonly DateTime? ResetAtUtc;
         internal readonly bool DailyLimit;
         internal readonly int RetryAfterSeconds;
+        internal readonly string UserMessage;
         internal OpenRouterRequestException(int status, string body) : this(status, body, null, false, 0) { }
         internal OpenRouterRequestException(int status, string body, DateTime? resetAtUtc, bool dailyLimit, int retryAfterSeconds = 0) : base("OpenRouter request failed with HTTP " + status + ".")
         {
@@ -346,6 +388,20 @@ namespace CapriDesktop
             ResetAtUtc = resetAtUtc;
             DailyLimit = dailyLimit;
             RetryAfterSeconds = retryAfterSeconds;
+            UserMessage = SafeProviderMessage(Body);
+        }
+
+        private static string SafeProviderMessage(string body)
+        {
+            try
+            {
+                OpenRouterApiError error = OpenRouterPool.ParseResponse(body).Error;
+                string message = error == null ? null : error.Message;
+                if (string.IsNullOrWhiteSpace(message)) return null;
+                message = Regex.Replace(message, @"(?i)(bearer\s+)[a-z0-9._-]+", "$1[redacted]");
+                return message.Length > 240 ? message.Substring(0, 240) : message;
+            }
+            catch (Exception) { return null; }
         }
     }
 }

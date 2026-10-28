@@ -69,7 +69,20 @@ namespace CapriDesktop
         [DataMember(Name = "id")] internal string Id;
         [DataMember(Name = "type")] internal string Type;
         [DataMember(Name = "function")] internal OpenRouterToolFunction Function;
+        [DataMember(Name = "extra_content", EmitDefaultValue = false)] internal OpenRouterExtraContent ExtraContent;
         internal ToolArguments ArgumentsObject;
+    }
+
+    [DataContract]
+    internal sealed class OpenRouterExtraContent
+    {
+        [DataMember(Name = "google", EmitDefaultValue = false)] internal OpenRouterGoogleExtra Google;
+    }
+
+    [DataContract]
+    internal sealed class OpenRouterGoogleExtra
+    {
+        [DataMember(Name = "thought_signature", EmitDefaultValue = false)] internal string ThoughtSignature;
     }
 
     [DataContract]
@@ -223,13 +236,19 @@ namespace CapriDesktop
             DailyRemaining = Math.Max(0, remaining);
             LastQuotaCheck = DateTime.UtcNow;
             if (DailyRemaining == 0) BlockedUntil = NextDailyResetUtc(DateTime.UtcNow);
-            else if (BlockedUntil <= DateTime.UtcNow) BlockedUntil = DateTime.MinValue;
+            else BlockedUntil = DateTime.MinValue;
         }
 
         internal void BlockDaily(DateTime untilUtc)
         {
             BlockedUntil = untilUtc > DateTime.UtcNow ? untilUtc : NextDailyResetUtc(DateTime.UtcNow);
             DailyRemaining = 0;
+        }
+
+        internal void RefreshBlockedQuota()
+        {
+            if (!IsBlocked || DateTime.UtcNow - LastQuotaCheck < TimeSpan.FromMinutes(5)) return;
+            OpenRouterWire.RefreshQuota(this);
         }
 
         internal string QuotaText()

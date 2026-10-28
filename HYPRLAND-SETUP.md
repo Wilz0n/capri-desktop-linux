@@ -64,5 +64,5 @@ La sintaxis anterior a 0.55 suele usar reglas en formato `hyprland.conf`; esta c
 - No pongas `border_size = 0` como regla global ni cambies colores de borde globales.
 - No sobrescribas todo `~/.config/hypr` ni `~/.config/voxtype/config.toml`.
 - No copies estado efímero de `$XDG_RUNTIME_DIR` (`voxtype/state`, `capri/voice.txt`) entre máquinas.
-- No copies la clave OpenRouter ni otros secretos. Configura la clave de cada dispositivo desde **Brain settings…** de Capri.
+- No copies las claves Gemini/OpenRouter ni otros secretos. Configura las claves propias de cada dispositivo desde **Brain settings…** de Capri.
 - Antes de editar manualmente cualquiera de los dos archivos Lua, crea una copia de respaldo y evita duplicar las líneas si ya existen.

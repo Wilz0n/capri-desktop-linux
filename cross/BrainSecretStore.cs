@@ -51,7 +51,7 @@ namespace CapriDesktop
 
         internal static bool IsKey(string provider, string key)
         {
-            if (provider == "openrouter") return !string.IsNullOrWhiteSpace(key);
+            if (provider == "openrouter" || provider == "gemini") return !string.IsNullOrWhiteSpace(key);
             if (provider == "nvidia") return (key ?? "").StartsWith("nvapi-", StringComparison.Ordinal);
             return false;
         }

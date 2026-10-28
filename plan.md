@@ -1,43 +1,15 @@
-# Plan: fallback gratuito de OpenRouter para Capri
+# Plan: documentación y replicación de Capri en Omarchy
 
-## Objetivo
+- [ ] Corregir `setup-omarchy.sh`: aviso de estado Voxtype sin backticks ejecutables, comprobación de .NET 10 sin Python, resumen Gemini/OpenRouter y diagnóstico final de solo lectura (binario, entrada de menú, servicio/estado Voxtype, claves solo existencia/permisos, y cambios Hyprland presentes o sugerir `--apply-hyprland`). Diagnóstico informativo y no cambia exit status.
+- [ ] Corregir voz en `cross/Pet.cs`: permitir botón Wave si Gemini está conectado aunque OpenRouter no lo esté.
+- [ ] Reescribir sección Linux/Omarchy del README sin encabezados duplicados: clonado de rama, setup dry-run/aplicar, flags, Brain actual, voz, Hyprland, último fix (thought signatures, grupos OpenRouter de 3, sin repetir acciones, brain-errors.log), archivos locales, migración/seguridad, síntomas 400/429/503 y ventana fuera de pantalla.
+- [ ] Actualizar `AGENTS.md` para las claves Gemini/OpenRouter y la guía de instalación.
+- [ ] Actualizar `HYPRLAND-SETUP.md` en cuanto a credenciales y dependencia de Brain.
+- [ ] Verificar bash -n, dry-run sin ejecución accidental, diff-check, build y publish Linux x64. Reiniciar Capri y revisar clientes Hyprland.
 
-Cuando un modelo gratuito esté temporalmente indisponible o limitado, Capri debe avanzar automáticamente por modelos gratuitos elegibles de OpenRouter. No debe enviar modelos de pago, informar claramente el límite diario y permitir reabrir Brain settings sin cerrar la app.
+## Restricciones
 
-## Reglas de coste y elegibilidad
-
-- Solo modelos cuyo id termina en `:free`.
-- Confirmar precio cero desde el catálogo público; si falta precio/dato o no es numérico, rechazarlo.
-- Requerir compatibilidad con tools, salida solo texto y que no esté expirado.
-- Validar también el modelo recibido en la respuesta contra los ids del pool.
-- Nunca usar fallback a un modelo de pago. Los errores 402/401/403 son definitivos.
-- La garantía de la aplicación es no solicitar modelos pagos; saldo de OpenRouter en cero sigue siendo una barrera externa aconsejable, no una condición de código.
-
-## Orden del catálogo
-
-1. Modelo preferido guardado, si sigue en el catálogo verificado.
-2. `nvidia/nemotron-3.5-lightning:free`.
-3. `google/gemma-4-26b-a4b-it:free`.
-4. `cohere/north-mini-code:free`.
-5. Resto elegible de OpenRouter, orden determinista por contexto descendente e id.
-
-## Pasos
-
-- [x] Crear `cross/OpenRouterCatalog.cs`: descarga sin API key, caché local de 1 h, validación estricta, orden anterior y semilla offline.
-- [x] Cambiar `cross/OpenRouterPool.cs` a catálogo dinámico, pool automático y estado de cuota/cooldown.
-- [x] Mejorar `cross/OpenRouterWire.cs`: conservar `Retry-After` y `X-RateLimit-Reset`, enviar el conjunto gratuito elegible en el `models` array para que OpenRouter haga fallback, y detenerse ante cuota diaria; jamás reintentar 402.
-- [x] Añadir defensa adicional de coste máximo cero en el provider object de cada llamada a chat completions.
-- [x] Conectar `cross/Pet.cs` y `cross/BrainPanel.cs` al pool automático sin sobrescribir el modelo preferido con el último que respondió.
-- [x] Consultar `GET /api/v1/key` para mostrar solicitudes gratuitas usadas/límite/restantes; limitar rondas de tools con poco cupo y no llamar a la API cuando se sabe que el cupo diario se agotó.
-- [x] Mostrar mensajes diferenciados para cuota diaria, rate limit temporal, clave inválida y otros errores.
-- [x] Corregir `ShowBrainPanel` para recrear la ventana después de cerrarla.
-- [x] Añadir pruebas en `cross/Smoke.cs` para elegibilidad/orden, pool automático, cuota, defensa de precio cero y rechazo de respuestas no gratuitas.
-- [x] Actualizar la sección Brain de `README.md` con fallback y modelos free-only.
-- [x] Ejecutar build, smoke, publish Linux x64 y `git diff --check`; no se imprimió ni consultó la clave real del usuario.
-
-## Límites conocidos
-
-- OpenRouter determina la cuota diaria de cuenta y puede cambiar sus políticas. El estado de cuota es informativo y su lectura puede fallar; eso no debe permitir modelos pagos.
-- El endpoint de Chat Completions documenta un array de fallbacks en `models`; implementar lotes no es necesario y podría hacer varias solicitudes/cargos para una misma pregunta. Preferir una sola petición con el array completo de modelos gratuitos elegibles.
-- Los límites exactos por cuenta dependen de la política vigente de OpenRouter; no fijar el texto del límite a 50/1000 si la API devuelve los valores actuales.
-- Cada ronda de herramientas puede consumir otra solicitud. Restringir trabajo adicional cuando el restante sea bajo.
+- No leer, copiar ni mostrar secretos; el diagnóstico solo verifica existencia y permisos.
+- No copiar estado efímero de `$XDG_RUNTIME_DIR` entre máquinas.
+- El setup automático aplica Hyprland solo con `--apply-hyprland`.
+- No hacer commit ni push.

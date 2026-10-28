@@ -338,7 +338,7 @@ namespace CapriDesktop
 
     internal sealed class Talk
     {
-        internal const double LettersPerSecond = 28;
+        internal const double LettersPerSecond = 60;
         private const double MouthRate = 12;
         internal readonly Bubble Bubble = new Bubble();
         internal readonly Typer Typer = new Typer();

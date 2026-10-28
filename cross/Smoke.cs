@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Diagnostics;
 using System.IO;
 using Avalonia;
@@ -155,13 +156,15 @@ namespace CapriDesktop
                 string[] router = OpenRouterPool.ValidatePool(new[] { "openrouter/free" });
                 if (string.Join(",", pool) != "nvidia/nemotron-3.5-lightning:free,google/gemma-4-26b-a4b-it:free,cohere/north-mini-code:free,qwen/qwen3.8-27b:free" || router.Length != 1 || !OpenRouterPool.IsFreeRouter(router[0])) throw new Exception("OpenRouter pool assertion: pool=" + string.Join(",", pool) + " routerCount=" + router.Length + " router=" + (router.Length == 0 ? "none" : router[0]) + ".");
                 OpenRouterRequest request = OpenRouterPool.Request(pool, new[] { new ChatMessage("user", "Hello") }, false);
+                string smallPoolJson = OpenRouterWire.BuildPoolJson(pool.Take(3), new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, true);
+                if (!smallPoolJson.Contains("nvidia/nemotron-3.5-lightning:free") || !smallPoolJson.Contains("cohere/north-mini-code:free")) throw new Exception("OpenRouter three-model request batch lost the selected fallback IDs.");
                 bool routerMixRejected = false;
                 try { OpenRouterPool.Request(new[] { "openrouter/free", "cohere/north-mini-code:free" }, new ChatMessage[0], false); }
                 catch (InvalidOperationException) { routerMixRejected = true; }
                 if (string.Join(",", request.Models) != string.Join(",", pool) || !routerMixRejected || OpenRouterPool.Next(pool[0], pool, new HashSet<string>()) != pool[1] || OpenRouterPool.Retryable(401, 401) || !OpenRouterPool.Retryable(429, 429)) throw new Exception("OpenRouter free-only request or fallback policy failed.");
                 checks.Add("PASS OpenRouter pool: only exact free IDs are routed, order is preserved, paid/unverified models are rejected");
-                string orderedJson = OpenRouterWire.BuildPoolJson(pool, new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, true);
-                if (!orderedJson.Contains("\"models\":[\"nvidia/nemotron-3.5-lightning:free\",\"google/gemma-4-26b-a4b-it:free\",\"cohere/north-mini-code:free\",\"qwen/qwen3.8-27b:free\"]") || orderedJson.Contains("openrouter/free") || orderedJson.Contains("\"provider\":{\"max_price\":{\"prompt\":0,\"completion\":0}}") == false) throw new Exception("OpenRouter ordered fallback JSON did not exactly match the free-only allowlist.");
+                string orderedJson = OpenRouterWire.BuildPoolJson(pool.Take(3), new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, true);
+                if (!orderedJson.Contains("\"models\":[\"nvidia/nemotron-3.5-lightning:free\",\"google/gemma-4-26b-a4b-it:free\",\"cohere/north-mini-code:free\"]") || orderedJson.Contains("openrouter/free") || !orderedJson.Contains("\"provider\":{\"max_price\":{\"prompt\":0,\"completion\":0}}")) throw new Exception("OpenRouter ordered fallback JSON did not exactly match the first free-only batch.");
                 checks.Add("PASS OpenRouter request preserves the user-defined fallback order and excludes standalone router/unverified IDs");
                 string catalogJson = "{\"data\":[" +
                     "{\"id\":\"cohere/north-mini-code:free\",\"context_length\":256000,\"pricing\":{\"prompt\":\"0\",\"completion\":\"0\"},\"supported_parameters\":[\"tools\"],\"architecture\":{\"output_modalities\":[\"text\"]}}," +
@@ -200,15 +203,33 @@ namespace CapriDesktop
                 if (quotaFixture == null || quotaFixture.Used != 47 || quotaFixture.Limit != 50 || quotaFixture.Remaining != 3) throw new Exception("OpenRouter daily free quota parsing failed.");
                 checks.Add("PASS OpenRouter quota endpoint parsing reports current free requests used/limit/remaining");
                 string capturedFallback = null;
+                int fallbackAttempts = 0;
                 OpenRouterWire.SendOverride = delegate(string secret, string json)
                 {
                     capturedFallback = json;
+                    fallbackAttempts++;
                     return "{\"model\":\"nvidia/nemotron-3.5-lightning:free\",\"choices\":[{\"message\":{\"content\":\"fallback answer\"}}]}";
                 };
+                string[] manyFree = new[] { "cohere/north-mini-code:free", "nvidia/nemotron-3.5-lightning:free", "google/gemma-4-26b-a4b-it:free", "google/gemma-4-31b-it:free", "thinkingmachines/inkling:free", "recursive/flint-v1.0:free", "liquid/lfm-2.5-2.6b:free" };
+                OpenRouterPool.CatalogOverride = delegate(string preferred) { return manyFree; };
+                OpenRouterPool manyPool = OpenRouterPool.Automatic("smoke-test-key", manyFree[0]);
+                OpenRouterPool.CatalogOverride = null;
                 OpenRouterResponse fallbackResponse = OpenRouterWire.CompleteRaw(new OpenRouterPool("smoke-test-key", new[] { "cohere/north-mini-code:free", "nvidia/nemotron-3.5-lightning:free" }), new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, false);
                 OpenRouterWire.SendOverride = null;
                 if (fallbackResponse.Model != "nvidia/nemotron-3.5-lightning:free" || capturedFallback == null || !capturedFallback.Contains("\"provider\":{\"max_price\":{\"prompt\":0,\"completion\":0}}") || !capturedFallback.Contains("cohere/north-mini-code:free") || !capturedFallback.Contains("nvidia/nemotron-3.5-lightning:free")) throw new Exception("Automatic free-model fallback or zero-price guard wasn't included in the request.");
-                checks.Add("PASS OpenRouter automatic free fallback request includes only pool models and a zero-price provider ceiling");
+                OpenRouterWire.SendOverride = delegate(string secret, string json)
+                {
+                    fallbackAttempts++;
+                    if (!json.Contains("\"provider\":{\"max_price\":{")) throw new Exception("OpenRouter fallback request lost its zero-price guard.");
+                    string[] ids = manyFree.Where(json.Contains).ToArray();
+                    if (ids.Length > 3) throw new Exception("OpenRouter sent a batch larger than 3 models.");
+                    if (ids[0] == manyFree[0]) throw new OpenRouterRequestException(503, "batch unavailable");
+                    return "{\"model\":\"" + ids[0] + "\",\"choices\":[{\"message\":{\"content\":\"batch fallback\"}}]}";
+                };
+                OpenRouterResponse batched = OpenRouterWire.CompleteRaw(manyPool, new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, false);
+                OpenRouterWire.SendOverride = null;
+                if (batched.Model != manyFree[3] || fallbackAttempts < 2) throw new Exception("OpenRouter did not move from the first failed group of 3 to the next group.");
+                checks.Add("PASS OpenRouter groups fallback models in batches of three and preserves the zero-price ceiling");
                 OpenRouterWire.SendOverride = delegate(string secret, string json) { return "{\"model\":\"vendor/paid-model\",\"choices\":[{\"message\":{\"content\":\"should reject\"}}]}"; };
                 bool paidResponseRejected = false;
                 try { OpenRouterWire.CompleteRaw(new OpenRouterPool("smoke-test-key", new[] { "cohere/north-mini-code:free" }), new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, false); }
@@ -225,12 +246,58 @@ namespace CapriDesktop
                 OpenRouterWire.SendOverride = null;
                 if (!quotaBlocked || quotaCalls != 0) throw new Exception("Daily free quota did not block outgoing requests locally.");
                 checks.Add("PASS OpenRouter locally blocks exhausted daily quota and never accepts a non-free response");
+                if (!GeminiPool.IsAllowed("gemini-3.8-flash") || !GeminiPool.IsAllowed("gemini-3.5-flash-lite") || !GeminiPool.IsAllowed("gemini-3.1-flash-lite") || GeminiPool.IsAllowed("gemini-4-argon") || GeminiPool.IsAllowed("gemini-2.0-flash") || GeminiPool.DefaultModel != "gemini-3.5-flash-lite" || GeminiPool.Models[0] != GeminiPool.DefaultModel) throw new Exception("Gemini free model allowlist/default order admitted an unknown or non-current model.");
+                string geminiBody = GeminiPool.Build("gemini-3.8-flash", new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, true);
+                string geminiFastBody = GeminiPool.Build("gemini-3.8-flash", new[] { "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"ok\"}" }, true, 1000, true);
+                string liteBody = GeminiPool.Build("gemini-3.5-flash-lite", new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, true);
+                if (!geminiBody.Contains("gemini-3.8-flash") || !geminiBody.Contains("\"tools\"") || geminiBody.Contains("GEMINI_API_KEY") || geminiBody.Contains("reasoning_effort") || !geminiFastBody.Contains("\"reasoning_effort\":\"low\"") || liteBody.Contains("reasoning_effort")) throw new Exception("Gemini free request body, reasoning settings or function tools were incorrect.");
+                bool geminiPaidRejected = false;
+                try { GeminiPool.Build("gemini-4-argon", new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, false); }
+                catch (InvalidOperationException) { geminiPaidRejected = true; }
+                if (!geminiPaidRejected || GeminiPool.NextPacificMidnightUtc(DateTime.UtcNow) <= DateTime.UtcNow) throw new Exception("Gemini allowlist did not reject a non-free model or Pacific reset calculation failed.");
+                GeminiPool cooldown = new GeminiPool("smoke-test-key");
+                if (cooldown.RegisterFailure("gemini-3.5-flash-lite") != 1 || cooldown.RegisterFailure("gemini-3.5-flash-lite") != 5 || cooldown.RegisterFailure("gemini-3.5-flash-lite") != 15) throw new Exception("Gemini increasing cooldown sequence failed.");
+                cooldown.RegisterSuccess("gemini-3.5-flash-lite", 1.5);
+                if (cooldown.IsCooling("gemini-3.5-flash-lite") || cooldown.LastModel != "gemini-3.5-flash-lite" || cooldown.LastLatencySeconds < 1.4) throw new Exception("Gemini cooldown/latency state did not reset after success.");
+                DateTime? retryReset = GeminiPool.ParseRetryReset("{\"error\":{\"details\":[{\"retryDelay\":\"23s\"}]}}");
+                if (!retryReset.HasValue || retryReset.Value <= DateTime.UtcNow.AddSeconds(15)) throw new Exception("Gemini per-minute retry delay wasn't parsed from the error response.");
+                checks.Add("PASS Gemini requests are limited to the free model allowlist and compute the Pacific daily reset");
+                OpenRouterPool.CatalogOverride = delegate(string preferred) { return new[] { "cohere/north-mini-code:free" }; };
+                OpenRouterPool fallbackOpenRouter = OpenRouterPool.Automatic("openrouter-test-key", "cohere/north-mini-code:free");
+                OpenRouterPool.CatalogOverride = null;
+                GeminiPool fallbackGemini = new GeminiPool("gemini-test-key", "gemini-3.8-flash");
+                OpenRouterWire.SendOverride = delegate(string secret, string json) { throw new OpenRouterRequestException(429, "free-model-daily-limit", OpenRouterPool.NextDailyResetUtc(DateTime.UtcNow), true); };
+                bool openRouterDaily = false;
+                try { OpenRouterWire.CompleteRaw(fallbackOpenRouter, new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, false); }
+                catch (OpenRouterRequestException error) { openRouterDaily = error.DailyLimit; }
+                OpenRouterWire.SendOverride = null;
+                GeminiPool.SendOverride = delegate(string secret, string json)
+                {
+                    if (secret != "gemini-test-key" || !json.Contains("gemini-3.8-flash")) throw new Exception("Gemini fallback sent an unexpected key or model.");
+                    return "{\"model\":\"gemini-3.8-flash\",\"choices\":[{\"message\":{\"content\":\"Gemini fallback answer\"}}]}";
+                };
+                OpenRouterResponse geminiFallback = fallbackGemini.CompleteRaw(new[] { "{\"role\":\"user\",\"content\":\"hello\"}" }, false);
+                GeminiPool.SendOverride = null;
+                if (!openRouterDaily || !fallbackOpenRouter.IsBlocked || geminiFallback.Model != "gemini-3.8-flash") throw new Exception("Daily OpenRouter exhaustion failed to yield to Gemini fallback.");
+                checks.Add("PASS exhausted OpenRouter daily quota is independently blocked while Gemini free fallback remains available");
+                string signature = OpenRouterWire.ToolCallMessage("{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call-signed\",\"type\":\"function\",\"function\":{\"name\":\"open_app\",\"arguments\":\"{}\"},\"extra_content\":{\"google\":{\"thought_signature\":\"sig_123\"}}}]}");
+                if (!signature.Contains("thought_signature") || !signature.Contains("sig_123")) throw new Exception("Gemini thought signature was not preserved verbatim.");
+                checks.Add("PASS Gemini tool-call assistant message retains the thought signature exactly");
                 OpenRouterResponse fakeTool = OpenRouterPool.ParseResponse("{\"model\":\"cohere/north-mini-code:free\",\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call-safe-1\",\"type\":\"function\",\"function\":{\"name\":\"open_app\",\"arguments\":\"{\\\"name\\\":\\\"Spotify\\\"}\"}}]}}]}");
                 OpenRouterToolCall parsedTool = fakeTool.Choices[0].Message.ToolCalls[0];
                 string toolResult = OpenRouterWire.ToolResult(parsedTool.Id, "Opened Spotify.");
                 string toolAssistant = OpenRouterWire.ToolCallMessage(null, new List<OpenRouterToolCall> { parsedTool });
                 if (toolAssistant.IndexOf("call-safe-1", StringComparison.Ordinal) < 0 || toolResult.IndexOf("call-safe-1", StringComparison.Ordinal) < 0 || toolResult.IndexOf("tool_call_id", StringComparison.Ordinal) < 0) throw new Exception("OpenRouter tool call id/result correlation failed.");
+                OpenRouterResponse signedTool = OpenRouterPool.ParseResponse("{\"model\":\"gemini-3.5-flash-lite\",\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call-signed\",\"type\":\"function\",\"function\":{\"name\":\"open_app\",\"arguments\":\"{\\\"name\\\":\\\"Spotify\\\"}\"},\"extra_content\":{\"google\":{\"thought_signature\":\"signed-state-123\"}}}]}}]}");
+                string signedMessage = OpenRouterWire.ToolCallMessage(null, new List<OpenRouterToolCall> { signedTool.Choices[0].Message.ToolCalls[0] });
+                if (!signedMessage.Contains("thought_signature") || !signedMessage.Contains("signed-state-123")) throw new Exception("Gemini thought signature was not retained in the assistant tool-call message.");
                 checks.Add("PASS OpenRouter HTTP client fake completion and tool call/result ID serialization");
+                checks.Add("PASS Gemini thought signature is preserved for the following tool-result turn");
+                OpenRouterRequestException diagnostic400 = new OpenRouterRequestException(400, "{\"error\":{\"code\":400,\"message\":\"Function call is missing thought_signature.\"}}");
+                if (diagnostic400.UserMessage == null || !diagnostic400.UserMessage.Contains("thought_signature")) throw new Exception("Provider 400 detail was not exposed safely.");
+                BrainErrorLog.Write("smoke diagnostic must not include a secret sk-or-v1-unsafe-example");
+                if (BrainErrorLog.ReadForTest().Contains("sk-or-v1-unsafe-example")) throw new Exception("Brain error log failed to redact a secret-looking value.");
+                checks.Add("PASS provider diagnostics retain safe 400 detail and redact secrets in local logs");
                 DictationState dictation;
                 if (!Dictate.ParseState("idle", out dictation) || dictation != DictationState.Idle || !Dictate.ParseState("recording\n", out dictation) || dictation != DictationState.Recording || !Dictate.ParseState("transcribing", out dictation) || dictation != DictationState.Transcribing || Dictate.ParseState("busy", out dictation)) throw new Exception("Voxtype state parser accepted/rejected a state incorrectly.");
                 string inboxFolder = Path.Combine(folder, "voxtype-fixture");

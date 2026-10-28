@@ -231,7 +231,7 @@ fi
 
 if (( ! DRY_RUN )); then
   has_command dotnet || die "dotnet no quedó instalado."
-  dotnet --list-sdks | python3 -c 'import sys; raise SystemExit(0 if any(x.split(" ",1)[0].startswith("10.") for x in sys.stdin if " " in x) else 1)' || die "Se requiere .NET SDK 10.x."
+  dotnet --list-sdks | grep -q '^10\.' || die "Se requiere .NET SDK 10.x."
   [[ -x "$SCRIPT_DIR/out/Capri/Capri" ]] || die "Falta el ejecutable. Ejecuta sin --skip-build o publica Capri primero."
   mkdir -p "$HOME/.local/bin"
   run ln -sfn "$SCRIPT_DIR/out/Capri/Capri" "$HOME/.local/bin/capri"
@@ -251,7 +251,7 @@ if (( ! SKIP_VOXTYPE )); then
     if [[ -n "${XDG_RUNTIME_DIR:-}" && -f "$XDG_RUNTIME_DIR/voxtype/state" ]]; then
       log "Voxtype state: $(<"$XDG_RUNTIME_DIR/voxtype/state")"
     else
-      warn "No veo el state file de Voxtype todavía; comprueba `systemctl --user status voxtype.service` después de iniciar la sesión gráfica."
+      warn "No veo el state file de Voxtype todavía; comprueba 'systemctl --user status voxtype.service' después de iniciar la sesión gráfica."
     fi
   fi
 fi
@@ -260,8 +260,62 @@ cat <<EOF
 
 Instalación de Capri preparada.
 - Menú: cierra y vuelve a abrir Super+I; busca Capri en Apps.
-- Brain: en Capri → Brain settings…, introduce la clave OpenRouter propia del dispositivo,
-  elige un modelo :free y conecta. Este instalador no lee ni copia claves.
+- Brain: Gemini es el proveedor principal; OpenRouter es opcional como respaldo gratuito.
+  Introduce las claves propias del dispositivo en Capri → Brain settings….
+  Este instalador solo verifica existencia y permisos; nunca lee ni copia el contenido.
 - Voz: usa el botón Wave de Capri; los atajos globales de Voxtype quedan desactivados.
 - Hyprland: consulta $SCRIPT_DIR/HYPRLAND-SETUP.md.
 EOF
+
+log "Comprobación final (solo lectura)"
+check_ok() { printf '  OK    %s\n' "$*"; }
+check_missing() { printf '  FALTA %s\n' "$*"; }
+
+if [[ -x "$HOME/.local/bin/capri" && "$(readlink -f "$HOME/.local/bin/capri" 2>/dev/null || true)" == "$(readlink -f "$SCRIPT_DIR/out/Capri/Capri" 2>/dev/null || true)" ]]; then
+  check_ok "~/.local/bin/capri apunta al ejecutable publicado y es ejecutable"
+else
+  check_missing "enlace ejecutable ~/.local/bin/capri"
+fi
+
+if [[ -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/capri.desktop" ]]; then
+  check_ok "entrada de menú Capri instalada"
+else
+  check_missing "entrada de menú Capri"
+fi
+
+if (( ! SKIP_VOXTYPE )); then
+  if systemctl --user is-active --quiet voxtype.service; then check_ok "voxtype.service activo"; else check_missing "voxtype.service activo"; fi
+  if [[ -n "${XDG_RUNTIME_DIR:-}" && -f "$XDG_RUNTIME_DIR/voxtype/state" ]]; then
+    state="$(<"$XDG_RUNTIME_DIR/voxtype/state")"
+    if [[ "$state" == idle ]]; then check_ok "Voxtype state=idle"; else warn "Voxtype state=$state (Wave requiere idle)"; fi
+  else
+    warn "state file Voxtype no visible; revisa 'systemctl --user status voxtype.service'"
+  fi
+else
+  warn "Voxtype fue omitido con --skip-voxtype"
+fi
+
+check_key_file() {
+  local file="$1" label="$2" mode
+  if [[ -f "$file" ]]; then
+    mode="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || printf unknown)"
+    if [[ "$mode" == 600 ]]; then check_ok "$label configurada (permiso 0600)"; else warn "$label existe con permiso $mode; esperado 600."; fi
+  else
+    warn "$label no configurada; añádela en Capri → Brain settings… (Gemini debe usar un proyecto sin billing)."
+  fi
+}
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/Capri"
+check_key_file "$config_dir/gemini.key" "clave Gemini"
+check_key_file "$config_dir/openrouter.key" "clave OpenRouter de respaldo"
+
+if grep -Fq 'name = "capri-no-outline"' "$HYPR_DIR/hyprland.lua" 2>/dev/null; then
+  check_ok "regla Lua de borde Capri"
+else
+  warn "regla Hyprland no detectada; revisa HYPRLAND-SETUP.md o ejecuta --apply-hyprland"
+fi
+if grep -Fq 'Bring Capri to current screen' "$HYPR_DIR/bindings.lua" 2>/dev/null; then
+  check_ok "atajo de rescate Super+Shift+C"
+else
+  warn "atajo de rescate no detectado; revisa HYPRLAND-SETUP.md o ejecuta --apply-hyprland"
+fi
+printf '\nDiagnóstico informativo; revisa los avisos FALTA antes de probar.\n'

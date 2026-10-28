@@ -3,111 +3,106 @@
   <img src="assets/capri.png" alt="Capri" width="40%" align="middle">
 </p>
 
-<p align="center">
-  Bring Capri (back lol) to life as a desktop companion! Inspired by jpartnma_'s tiktok video.
-</p>
+<p align="center">Bring Capri (back lol) to life as a desktop companion!</p>
 
 <p align="center">
   <a href="https://github.com/lachydotmcg/capri-desktop/releases/latest/download/Capri-Setup.exe"><b>Download for Windows</b></a>
-  &nbsp;·&nbsp;
-  <a href="#mac-and-linux-early-preview">Mac and Linux</a>
-  &nbsp;·&nbsp;
-  <a href="https://lachydotmcg.github.io/capri-desktop/setup/">Setup guide</a>
-  &nbsp;·&nbsp;
-  <a href="https://lachydotmcg.github.io/capri-desktop/">Website</a>
-  &nbsp;·&nbsp;
-  <a href="https://discord.gg/F4fDHfGtFk">Discord</a>
+  &nbsp;·&nbsp; <a href="#linux-and-omarchy">Linux / Omarchy</a>
+  &nbsp;·&nbsp; <a href="https://lachydotmcg.github.io/capri-desktop/setup/">Setup guide</a>
+  &nbsp;·&nbsp; <a href="https://discord.gg/F4fDHfGtFk">Discord</a>
 </p>
-
-<table align="center">
-  <tr>
-    <td align="center"><img src="assets/readme/idle.webp" alt="Capri idling and blinking" width="150"><br><sub>Hanging out</sub></td>
-    <td align="center"><img src="assets/readme/talk.webp" alt="Capri talking" width="150"><br><sub>Talking</sub></td>
-    <td align="center"><img src="assets/readme/tossed.webp" alt="Capri flailing while dragged" width="150"><br><sub>Getting tossed</sub></td>
-    <td align="center"><img src="assets/readme/glitch.webp" alt="Capri glitching" width="150"><br><sub>Glitching</sub></td>
-    <td align="center"><img src="assets/readme/sleep.webp" alt="Capri asleep, then booting back up" width="150"><br><sub>Napping</sub></td>
-  </tr>
-</table>
-
-Beware that Capri may try to take over your human CPU. We take no responsibility for her actions.
 
 ## What she does
 
 - **Talks back.** Type to her and she answers in her own words.
-- **Talks out loud.** Add an ElevenLabs key and she speaks, or voice chat with her.
+- **Talks out loud.** Add an ElevenLabs key for spoken replies.
+- **Listens when you click Wave.** Local Voxtype transcription; no global dictation hotkey is needed.
 - **Does things for you.** Ask her to open apps, play music or close a tab.
-- **Watches you play.** Turn it on and she comments on your games.
 - **Sits on your stuff.** Drop her on a window, an icon or the bottom of your screen.
 
-<p align="center">
-  <img src="assets/readme/bubble.png" alt="Capri's speech box with the pencil and wave buttons" width="31%">
-  <img src="assets/readme/sit.png" alt="Capri sitting on a window" width="31%">
-  <img src="assets/readme/mainframe.png" alt="The Capri Mainframe" width="22%">
-</p>
+## Linux and Omarchy
 
-## What you need
+The `linux-features` branch contains Capri's current Linux/Hyprland implementation: Gemini and OpenRouter Brain providers, Voxtype voice capture, Omarchy Super+I app registration, a per-window border rule and the Super+Shift+C rescue binding. Use this branch and its build; the upstream Linux tarball does not include all of these integrations.
 
-- Windows 10 or 11 (64-bit). Nothing else to install.
-- A mic, if you want to voice chat.
+### Install on another Omarchy machine
 
-| | Brain on your PC | Brain from a key (like the free NVIDIA one) |
+First clone the current branch. Review the dry-run output before installing:
+
+```sh
+git clone --branch linux-features --single-branch https://github.com/Wilz0n/capri-desktop-linux.git
+cd capri-desktop-linux
+git log -1 --oneline
+./setup-omarchy.sh --dry-run
+```
+
+If the plan looks right, install the packages, configure Voxtype, publish Capri and register the menu. To also append the scoped Hyprland border and rescue rules (with backups), use:
+
+```sh
+./setup-omarchy.sh --apply-hyprland
+```
+
+Installer options:
+
+| Option | Effect |
+| --- | --- |
+| `--dry-run` | Preview actions without installing packages or editing config. |
+| `--apply-hyprland` | Add only Capri's Lua border rule and Super+Shift+C rescue bind, then reload Hyprland. |
+| `--skip-voxtype` | Skip Voxtype package/service/model setup. |
+| `--skip-build` | Reuse an existing `out/Capri/Capri` publish. |
+| `--help` | Show all options. |
+
+The installer is intended for Arch/Omarchy in an active Wayland/Hyprland session. It installs the .NET 10 SDK and Linux dependencies, installs `voxtype-bin` from AUR if needed, downloads/activates Whisper `large-v3-turbo` for Spanish, disables Voxtype's global hotkey, publishes a self-contained Linux binary, creates `~/.local/bin/capri`, and installs the Super+I menu entry and icon. Hyprland files are not changed unless `--apply-hyprland` is given. The end-of-run diagnostic is read-only and reports missing steps; it never changes the setup script's exit status.
+
+### First launch and Brain setup
+
+1. Close and reopen **Super+I**, search for **Capri** under **Apps**, and launch her.
+2. Open the tray/context menu → **Brain settings…**.
+3. Create a Gemini API key at [Google AI Studio](https://aistudio.google.com/apikey) in a project with **billing disabled**, then paste it into the Gemini field. Gemini is primary by default. The free tier may use submitted content to improve Google products; avoid sensitive data. Capri cannot verify billing is disabled.
+4. Optionally create a free-only OpenRouter key at [OpenRouter API keys](https://openrouter.ai/workspaces/default/keys) and paste it into the OpenRouter backup field. Set a low credit limit on the key. Capri requests only catalog-verified `:free` models and enforces a zero maximum provider price.
+5. Choose the provider order/reply language and select **Save and connect**. The keys are saved separately in the user's Capri config with mode `0600`; the installer never reads, prints, copies or migrates them.
+6. Send a harmless message such as “hola Capri”. The panel shows provider status and OpenRouter quota information.
+
+No model order or key is copied from another computer. The first provider defaults to Gemini `gemini-3.5-flash-lite`, then `gemini-3.1-flash-lite`, then `gemini-3.8-flash`. A failing Gemini model is cooled down for 1, 5, then 15 minutes. OpenRouter is account-quota limited; changing free model does not bypass an exhausted daily account quota.
+
+### Current Brain behavior and recent fixes
+
+- **Gemini tool calls:** Gemini 3 returns a `thought_signature` with tool calls. Capri preserves it in the assistant message sent with the tool result; dropping it causes HTTP 400 on the follow-up turn.
+- **OpenRouter model fallback:** the API accepts at most three model IDs per chat completion. Capri submits the verified free pool in groups of three and tries the next group when a group fails. Every request has a provider `max_price` of zero and paid/unverified responses are rejected.
+- **No duplicate side effects:** once a local action (for example opening Spotify) has executed, a later provider failure returns the local action result instead of asking another provider to execute the same action again.
+- **Diagnostics:** sanitized provider HTTP errors are written to `~/.config/Capri/brain-errors.log` (latest 50 lines). It is safe to inspect for the provider's error message, but still do not put API keys in logs or screenshots.
+- **Reply animation:** text is shown at about 60 characters per second.
+- **Quotas:** Gemini's per-project/model free limits can change; check AI Studio usage. OpenRouter's free daily quota is account-wide and resets at 00:00 UTC. Capri reads its available quota endpoint and reports resets; it never switches to a paid OpenRouter model.
+
+### Files and migration
+
+| Path | Contents | Copy to another computer? |
 | --- | --- | --- |
-| Memory | 8 GB, 16 GB is better | 4 GB |
-| Graphics card | Optional, but 4 GB or more makes her faster | Not needed |
-| Space | 3 to 5 GB | Under 100 MB |
-| Internet | Only for the download | Always |
+| `~/.config/Capri/gemini.key` | This device's Gemini API key, mode 0600 | **No.** Create a key for the destination/project. |
+| `~/.config/Capri/openrouter.key` | This device's OpenRouter key, mode 0600 | **No.** Create a key for the destination. |
+| `~/.config/Capri/cross.json` | Capri preferences (provider order, model, language, position) | Prefer configure locally; do not copy the whole file with secret-era settings. |
+| `~/.config/Capri/openrouter-free.json` | Public OpenRouter model catalog cache, no API key | Optional; Capri refreshes/downloads it itself. |
+| `~/.config/Capri/brain-errors.log` | Sanitized recent provider errors | No; local diagnostics only. |
+| `$XDG_RUNTIME_DIR/voxtype/state`, `$XDG_RUNTIME_DIR/capri/voice.txt` | Ephemeral voice state/transcript | **Never.** Do not migrate runtime state. |
+| `~/.config/voxtype/config.toml` | Machine-specific microphone/model options | Do not overwrite wholesale; setup script backs up and changes only required settings. |
+| `~/.config/hypr/` | Personal compositor settings | Do not copy wholesale; add only Capri's documented lines. |
 
-## Getting started
+### Hyprland integration
 
-1. Download **Capri-Setup.exe** and run it
-2. In the Capri Mainframe, press **Set up her brain**, or press **Free key** to use a free NVIDIA key
-3. Optional: paste an ElevenLabs key so she can talk. Make the key with **Restrict key** turned off
+On Hyprland 0.55+ Omarchy's Lua config, Capri's per-window border rule and rescue bind are documented in [HYPRLAND-SETUP.md](HYPRLAND-SETUP.md). The installer applies them only with `--apply-hyprland`, makes backups, and does not add global Voxtype hotkeys. `Super+Shift+C` invokes `capri --rescue`; it requires Capri to be running and `~/.local/bin` on `PATH`.
 
-Stuck? The [setup guide](https://lachydotmcg.github.io/capri-desktop/setup/) walks through it, or ask in the [Discord](https://discord.gg/F4fDHfGtFk).
+### Troubleshooting
 
-Windows or your antivirus may warn you because it's a new app. All the code is here.
+| Symptom | Likely cause / action |
+| --- | --- |
+| HTTP 400 mentioning `thought_signature` | Old binary without Gemini signature preservation. Pull latest `linux-features`, republish and restart Capri. |
+| HTTP 400 saying `'models' array must have 3 items or fewer` | Old OpenRouter fallback implementation. Pull latest branch and republish. |
+| HTTP 429 | Provider/model or account quota. Gemini falls through to another free provider/model; OpenRouter daily quota is account-wide. Check provider status and retry after reset. |
+| HTTP 503 | Gemini model/provider temporarily busy. Capri cools down that Gemini model and tries another provider/model. |
+| Capri window is off-screen | If Capri is running, press **Super+Shift+C**. Verify class/bind with `hyprctl clients -j` and `hyprctl binds -j`. |
+| Wave says Voxtype is busy/unavailable | Check `systemctl --user status voxtype.service`; ensure `$XDG_RUNTIME_DIR/voxtype/state` says `idle`. Wave starts recording only when clicked. |
+| Rescue bind cannot find `capri` | Ensure `~/.local/bin` is in Hyprland's PATH and `readlink ~/.local/bin/capri` points to this checkout's `out/Capri/Capri`. |
 
-## Mac and Linux (early preview)
-
-Mac and the upstream Linux release remain early previews. The Linux/Hyprland setup described below is the development setup used for Capri's Linux voice, OpenRouter Brain and desktop integration; it requires the Linux Capri build from this repository rather than the older upstream tarball.
-
-1. Download [Mac (Apple Silicon)](https://github.com/lachydotmcg/capri-desktop/releases/latest/download/Capri-mac-apple-silicon.zip), [Mac (Intel)](https://github.com/lachydotmcg/capri-desktop/releases/latest/download/Capri-mac-intel.zip) or [Linux](https://github.com/lachydotmcg/capri-desktop/releases/latest/download/Capri-linux-x64.tar.gz)
-2. Install [Ollama](https://ollama.com), then run `ollama pull gemma4:e4b` for her brain
-3. **Mac:** unzip it and open Capri. If macOS says it can't check her, open System Settings → Privacy & Security and click **Open Anyway**. Needs macOS 15 or newer
-4. **Linux upstream preview:** unpack it and run `Capri/Capri`. It sits on windows on X11; on Wayland it sits at the bottom of your screen. The additional Linux features below are in this repository's Linux build.
-
-### Linux/Omarchy setup and migration
-
-To prepare a new Omarchy machine from this repository, run:
-
-```sh
-./setup-omarchy.sh
-```
-
-The installer adds required Arch packages, configures the Voxtype user service and Spanish `large-v3-turbo` model, publishes Capri for Linux x64, registers the app in the Omarchy Super+I menu, and sets up the `capri --rescue` command. It does not copy OpenRouter credentials. Enter that device's own key in Capri → **Brain settings…**.
-
-By default, the script does not edit Hyprland files; it prints the two Lua snippets to review. Use `./setup-omarchy.sh --apply-hyprland` to append the border rule and `Super+Shift+C` rescue binding idempotently (with backups), then reload Hyprland. `./setup-omarchy.sh --dry-run` previews actions. Additional options: `--skip-voxtype`, `--skip-build`, and `--help`. See [HYPRLAND-SETUP.md](HYPRLAND-SETUP.md) for the exact configuration, verification, and safety constraints.
-
-#### Requirements and manual setup
-
-#### Requirements
-
-- 64-bit Arch Linux/Omarchy, a Wayland Hyprland session, and a working microphone.
-- The script installs .NET 10 SDK and the Linux dependencies, then builds this checkout. For other Linux distributions, follow the manual build and menu instructions below.
-- Voxtype local transcription uses Whisper `large-v3-turbo` in Spanish (`es`). Model download requires internet access.
-- Capri's OpenRouter Brain requires internet and a separately configured key; local voice transcription can work without OpenRouter.
-
-#### Build and launch Capri
-
-From the repository root, start Capri with the included launcher:
-
-```sh
-./start-capri.sh
-```
-
-The script runs `out/Capri/Capri` when a published executable is available; otherwise it runs the project with `dotnet run --project cross/Capri.Cross.csproj`. This is a foreground process: keep that terminal open while using Capri, and press `Ctrl+C` there to stop it. It does not install a background service or start Capri automatically after login. On first run, the .NET SDK restores/builds the project as needed.
-
-To build and publish a standalone Linux executable instead:
+For manual build/launch, use `./start-capri.sh`; it runs the published executable if present or `dotnet run` otherwise. To publish manually:
 
 ```sh
 dotnet build cross/Capri.Cross.csproj -c Release
@@ -116,96 +111,17 @@ dotnet publish cross/Capri.Cross.csproj -c Release -r linux-x64 --self-contained
   -p:DebugType=none -o out/Capri
 ```
 
-After publishing, `./start-capri.sh` uses `out/Capri/Capri` automatically. You can also launch `./out/Capri/Capri` directly. Keep the executable and its resources together when not using single-file publishing. Capri stores ordinary preferences in its user config folder and the OpenRouter key separately in `$XDG_CONFIG_HOME/Capri/openrouter.key` (normally `~/.config/Capri/openrouter.key`, mode `0600`). Do not commit or copy that key in a repository, `cross.json`, logs, screenshots, or this guide. On a new device, open the Capri tray menu → **Brain settings…** and enter that device's own key.
-
-#### Add Capri to the Omarchy Super+I Apps menu
-
-Run the included installer from the repository root:
-
-```sh
-./install-omarchy.sh
-```
-
-The script registers Capri in the current user's applications directory and installs its icon under the hicolor icon theme. The source image is `assets/capri.webp`; Omarchy's current Apps menu icon resolver searches SVG and PNG files, so the script uses ImageMagick (`magick`) to convert it to a 256×256 PNG. It writes absolute `Exec`, `TryExec`, and `Icon` paths that match this checkout, making it safe to clone the repository to another directory and run the installer there. The script only installs the launcher and icon; it does not start Capri. It optionally validates the desktop entry when `desktop-file-validate` is available.
-
-After installation, close and reopen **Super+I**, then search for **Capri** under **Apps**. The app row should show the Capri image. Selecting that row starts `start-capri.sh`, which uses the published executable if present and otherwise starts the project through .NET. If you move the checkout later, rerun `./install-omarchy.sh` so the desktop entry is regenerated with the new absolute paths.
-
-Requirements for installing the menu entry: Bash, ImageMagick (`magick`), and a user session with Omarchy. On Arch/Omarchy, install ImageMagick with `sudo pacman -S imagemagick` if it is missing. `desktop-file-validate` is optional and provided by `desktop-file-utils`.
-
-#### Brain: OpenRouter free-only setup
-
-1. Open **Brain settings…** from Capri's tray menu.
-2. Enter an OpenRouter API key, choose the preferred free model, choose a reply language, and press **Connect**. Capri places the preferred model first, then routes through its current catalog of free models with tool support. The key is stored locally with owner-only file permissions.
-3. Capri refreshes the public model catalog hourly and admits only IDs ending in `:free` whose advertised prompt/completion prices are zero, that support tools and text output, and that have not expired. Requests contain only those IDs and a zero maximum provider price; responses from any ID outside the verified free pool are rejected. Paid fallback models and the standalone free router are not used.
-4. Verify the panel shows **Connected** and send one ordinary, non-private prompt. A tool action is only successful after Capri executes it; do not assume that model text alone means an action happened.
-
-Free model availability and OpenRouter's account limits can change. The Brain panel reports the free-request counter when OpenRouter makes it available. If a provider/model is limited, Capri automatically falls back to another verified free model. If the account's daily free quota is exhausted, Capri stops requests and reports the reset time; daily quotas reset at 00:00 UTC (the local time depends on your timezone). A 402, invalid key, or nonzero-price route is never retried with a paid model. Never paste a key into a terminal command or ask an assistant to print it.
-
-#### Voice: Capri Wave button
-
-- **Capri's Wave button:** Capri checks Voxtype's state, starts a recording to `$XDG_RUNTIME_DIR/capri/voice.txt` with directory mode `0700`, stops only a recording it started, waits for transcription, consumes the text once, then sends it through Capri's normal safety/media/Brain pipeline. The on-screen Wave changes to listening/transcribing. If OpenRouter is not connected, Capri reports the recognized text and asks for Brain setup rather than claiming it answered.
-Voxtype settings are machine-specific and intentionally are not modified by Capri's installer. Confirm the daemon is active (`systemctl --user status voxtype.service`) and the state file is `idle` before testing the Wave button. Capri's button will not stop a recording it did not start.
-
-The Wave button uses Voxtype's CLI directly. Its output goes to Capri's private runtime inbox, and Capri polls the state file to avoid consuming partial or duplicate transcripts. The runtime inbox is temporary and is not a migration target; create it automatically on the new session. Do not copy another computer's `/run/user/...` files.
-
-#### Hyprland: hidden border for Capri only
-
-On Hyprland 0.55+ (Lua configuration), this persistent per-window rule hides only Capri's compositor border while preserving global border settings and normal input. Add it to `~/.config/hypr/hyprland.lua` or to a Lua file it loads:
-
-```lua
-hl.window_rule({ name = "capri-no-outline", match = { class = "^Capri$" }, border_size = 0 })
-```
-
-Add the rule to `~/.config/hypr/hyprland.lua` or a Lua module it loads, then run `hyprctl reload`. The anchored class match is intentionally scoped; do not set transparent border colors or `border_size = 0` globally. Check the actual class on a new machine with `hyprctl clients -j` and adjust the regex only if that class differs. The rule persists across Capri restarts.
-
-For Capri's rescue binding, the personal Hyprland setup uses `Super + Shift + C` → `capri --rescue`. Ensure `capri` on `PATH` points to the current published executable (for this checkout: `out/Capri/Capri`) so the rescue command matches the running build. If Capri is off-screen, check `hyprctl clients -j` and the registered binding with `hyprctl binds -j`; do not blindly move or close other windows. Verify the resulting position afterward.
-
-#### Migration safety
-
-The installer makes a timestamped backup before changing an existing Voxtype configuration or adding Hyprland snippets. It never copies runtime state from another machine and never reads or migrates the OpenRouter key. Enter the key separately in Capri → **Brain settings…**. Voice input is started with Capri's Wave button; no global Voxtype hotkey is required.
+Then use `./install-omarchy.sh` to install/update only the menu entry and icon. Do not use `--skip-voxtype --apply-hyprland` as a generic manual publish command; those options configure other system integration.
 
 ## How to use her
 
-- **Pencil:** type to her
-- **Wave:** voice chat
-- **Drag her:** sit her on a window
-- **Right-click her** or the tray icon: menu and settings
+- **Pencil:** type to her.
+- **Wave:** voice chat (local Voxtype, started by clicking Wave).
+- **Drag her:** sit her on a window.
+- **Right-click her** or the tray icon: menu and settings.
 
-Just ask her for things, like "open Spotify", "play Blinding Lights", "pause", "what's playing?" or "close Discord".
-
-<details>
-<summary>All controls</summary>
-
-| Control | What it does |
-| --- | --- |
-| Shift + drop | sit her right where you drop her |
-| Ctrl + drop | she hangs on; click her to let go |
-| Mic button | mute your mic in voice chat |
-| Ctrl + Alt + V | start or stop voice chat |
-| Ctrl + Alt + N | mute your mic |
-| Ctrl + Alt + C | get her off your cursor |
-| Right-click, Move | she hops between your open windows |
-| Watch my screen | in the Mainframe: she comments as you play |
-| Speak replies | in the Mainframe: turn off to save ElevenLabs credits |
-
-</details>
-
-## Coming up
-
-- Working with your files: open, read and edit the ones you pick
-- Controlling YouTube and your apps: skip, fullscreen, click, type and scroll
-- A free voice that runs on your PC
-- Remembering things about you
-- Looking things up and telling you the answer
-- Her own cursor that she moves around your screen
-- Head pats (smh)
-- Mischief mode: screen glitches, stealing your cursor, "you've been hacked" notes
-- Mac and Linux: her voice, the Mainframe and doing things for you
+Just ask her for things, like “open Spotify”, “play Blinding Lights”, “pause”, “what's playing?” or “close Discord”.
 
 ## Licence
 
 Free for anything non-commercial: use her, share her, change her. No selling her or putting her in paid products. Full terms in [LICENSE.md](LICENSE.md) (PolyForm Noncommercial 1.0.0).
-
-Have fun and more updates to come!
-
-<sub>Setup guide based on Dancer's guide in the Discord. Font: Share Tech Mono (OFL).</sub>
